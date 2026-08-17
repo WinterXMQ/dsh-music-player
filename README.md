@@ -12,6 +12,14 @@ DeepSeek Harness 本地音乐库播放器插件（bundle）。
 - `music_play` 模型工具：agent 可按关键词让浏览器播放
 - 支持的格式：`mp3 / m4a / m4b / aac / flac / wav / ogg / opus / webm / aiff`（自动递归扫描子目录，上限 500 首）
 
+## 截图
+
+![播放条](assets/screenshot-bar.png)
+
+![播放面板](assets/screenshot-panel.png)
+
+![实时频谱](assets/screenshot-spectrum.png)
+
 ## 安装
 
 需要已安装 `dsh` CLI。
