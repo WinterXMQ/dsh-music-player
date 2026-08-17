@@ -28,6 +28,11 @@
     "url": "git+https://github.com/kendu76/dsh-music-player.git"
   },
   "license": "MIT",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "ci": "vitest run"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -39,5 +44,8 @@
   },
   "peerDependencies": {
     "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.10"
   }
 }
