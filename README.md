@@ -19,6 +19,7 @@ DeepSeek Harness 本地音乐库播放器插件（bundle）。
 ### 从 npm 安装（推荐，已发布到 registry）
 
 ```sh
+# 把 <profile> 换成实际 profile 名，如 web
 dsh plugin --profile <profile> add dsh-music-player
 ```
 
@@ -32,7 +33,7 @@ dsh plugin --profile <profile> add github:kendu76/dsh-music-player
 > 项目是手写的纯 JS（`lib/` 直接是发布产物），**没有**需要从源码构建的步骤，因此从 GitHub/npm 直装即可使用，无需像 TypeScript 包那样为构建脚本授权。
 
 安装后重启 DSH，打开 Web GUI：
-- 聊天输入区下方会出现「本地音乐播放器」播放条
+- 聊天输入区上方会出现「本地音乐播放器」播放条
 - 点击右侧「列表」按钮打开播放面板
 - 在面板顶部点击「选择音乐目录」并选定音乐目录（默认 `~/Music`），自动递归扫描
 - 之后可直接在对话框里让 agent 播放，例如「播放周杰伦的歌」
