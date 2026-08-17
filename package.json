@@ -28,6 +28,9 @@
     "url": "git+https://github.com/kendu76/dsh-music-player.git"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
