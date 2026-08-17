@@ -17,9 +17,9 @@ DeepSeek Harness 本地音乐库播放器插件（bundle）。
 
 ![播放条](assets/screenshot-bar.png)
 
-![播放面板](assets/screenshot-panel.png)
-
 ![实时频谱](assets/screenshot-spectrum.png)
+
+![播放面板](assets/screenshot-panel.png)
 
 ## 安装
 
