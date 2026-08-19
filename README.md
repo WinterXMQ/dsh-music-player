@@ -1,5 +1,7 @@
 # dsh-music-player
 
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
+
 DeepSeek Harness 本地音乐库播放器插件（bundle）。
 
 在 Host 进程里扫描本地音乐目录（默认 `~/Music`，可在面板里改），以 HTTP Range 流式（仅显示播放时间，暂无拖动跳转）给浏览器提供音频；浏览器侧给聊天输入区注入**正在播放条**（曲目信息、上一首/播放暂停/下一首/停止、顺序/单曲/乱序循环模式、音量、实时频谱），并提供一个浮动的**播放面板**（曲目列表 / 音乐目录选择与格式提示）。同时注册 `music_play` 模型工具，让 agent 可以直接按关键词播放本地音乐。
