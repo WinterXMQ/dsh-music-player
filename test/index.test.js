@@ -265,6 +265,51 @@ describe('dsh-music-player host routes', () => {
   })
 })
 
+describe('dsh-music-player /dir route', () => {
+  it('lists subdirectories with parent/up info', async () => {
+    const { handler, home, cleanup } = boot({
+      files: {
+        'Music/sub-a/song.mp3': 'A',
+        'Music/sub-b/song.mp3': 'B',
+        'Music/notes.txt': 'not a dir',
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/dir?path=' + encodeURIComponent(join(home, 'Music')) }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.name).toBe('Music')
+      expect(data.up).toBe(home)
+      const names = data.dirs.map((d) => d.name).sort()
+      expect(names).toEqual(['sub-a', 'sub-b']) // files excluded
+    } finally { cleanup() }
+  })
+
+  it('reports up=null at the filesystem root', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const root = resolve('/')
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/dir?path=' + encodeURIComponent(root) }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.up).toBe(null)
+    } finally { cleanup() }
+  })
+
+  it('handles the __drives__ sentinel on this (non-Windows) host', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/dir?path=__drives__' }), res)
+      const data = JSON.parse(res.body)
+      // On non-Windows the sentinel resolves to the POSIX root with no dirs.
+      expect([null, '/']).toContain(data.up)
+    } finally { cleanup() }
+  })
+})
+
 describe('dsh-music-player music_play tool', () => {
   it('registers a music_play tool with the expected name', async () => {
     const { tools, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
