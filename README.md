@@ -11,6 +11,7 @@ DeepSeek Harness 本地音乐库播放器插件（bundle）。
 - 本地音频流式播放（HTTP Range），刷新后断点续播
 - 顺序播放、单曲循环、乱序播放三种模式
 - 实时 7 段频谱可视化（解码音频包络驱动）
+- 播放时申请屏幕唤醒锁，防止听歌时熄屏/休眠（支持 Wake Lock 的浏览器，如 Chrome/Edge）
 - 播放列表面板可自由拖动，位置跨刷新记忆
 - `music_play` 模型工具：agent 可按关键词让浏览器播放
 - 支持的格式：`mp3 / m4a / m4b / aac / flac / wav / ogg / opus / webm / aiff`（自动递归扫描子目录，上限 500 首）
