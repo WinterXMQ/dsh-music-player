@@ -333,4 +333,67 @@ describe('dsh-music-player music_play tool', () => {
       expect(out.notice.length).toBeGreaterThan(0)
     } finally { cleanup() }
   })
+
+  it('sets a play intent with the picked track id on a query play', async () => {
+    const { tools, handler, cleanup } = boot({ musicFiles: { 'song.mp3': 'A', 'other.mp3': 'B' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ query: 'song' })
+      expect(out.played).toBe(true)
+      expect(out.action).toBe('play')
+      expect(out.track).toBe('song.mp3')
+      expect(out.matches).toBe(1)
+      expect(out.count).toBe(2)
+      // the intent it queued for the browser carries the play action + id/name
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      const intent = JSON.parse(res.body)
+      expect(intent.action).toBe('play')
+      expect(typeof intent.id).toBe('string')
+      expect(intent.name).toBe('song.mp3')
+    } finally { cleanup() }
+  })
+
+  it('prefers an exact filename match over a substring match', async () => {
+    const { tools, handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A', 'ab.mp3': 'B' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ query: 'a' })   // matches both a.mp3 and ab.mp3
+      expect(out.played).toBe(true)
+      expect(out.matches).toBe(2)
+      expect(out.track).toBe('a.mp3')                   // exact filename match wins
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      expect(JSON.parse(res.body).name).toBe('a.mp3')
+    } finally { cleanup() }
+  })
+
+  it('queues a pause intent for the browser player', async () => {
+    const { tools, handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ action: 'pause' })
+      expect(out.action).toBe('pause')
+      expect(out.played).toBe(false)
+      expect(out.count).toBe(1)
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      // transport actions carry no id
+      expect(JSON.parse(res.body)).toEqual({ action: 'pause' })
+    } finally { cleanup() }
+  })
+
+  it('queues next/prev/stop/resume intents', async () => {
+    const { tools, handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      for (const action of ['next', 'prev', 'stop', 'resume']) {
+        const out = await tool.execute({ action })
+        expect(out.action).toBe(action)
+        const res = makeRes()
+        await handler(makeReq({ url: '/dsh-music/intent' }), res)
+        expect(JSON.parse(res.body)).toEqual({ action })
+      }
+    } finally { cleanup() }
+  })
 })
