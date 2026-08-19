@@ -146,6 +146,56 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('lists .txt novels as books in the manifest', async () => {
+    // Books share the default root with music until a separate book root is set.
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: { 'a.mp3': 'AUDIO-A', 'novel.txt': '\u7b2c\u4e00\u7ae0 \u8d77\u6e90\u3002' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.tracks.map((t) => t.name)).toEqual(['a.mp3'])
+      expect(data.books.map((b) => b.name)).toEqual(['novel.txt'])
+      expect(data.bookRoot).toBe(musicDir)
+      // book URLs route through the /book/ path
+      expect(data.books[0].url.startsWith('/dsh-music/book/')).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('recognizes a Windows-style GBK-encoded .txt as a book', async () => {
+    // Windows often saves .txt as GBK (multi-byte, not valid UTF-8). The scanner
+    // matches by extension, so a GBK byte buffer must still surface as a book.
+    // "第一章" in GBK/GB2312: 第=B5DA 一=D2BB 章=D5C2
+    const gbk = Buffer.from([0xB5, 0xDA, 0xD2, 0xBB, 0xD5, 0xC2])
+    const { handler, cleanup } = boot({
+      musicFiles: { 'gbk-novel.txt': gbk },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.books.map((b) => b.name)).toEqual(['gbk-novel.txt'])
+      expect(data.tracks).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('synthesizing a book without a TTS key returns a clear error', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: { 'novel.txt': 'Hey \u8fd9\u662f\u4e00\u6bb5\u5c0f\u8bf4\u6587\u672c\u3002' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0' }), res)
+      // No key in the test env -> host returns 500 with a Chinese diagnostic,
+      // not a crash.
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('\u672a\u914d\u7f6e') // "未配置"
+    } finally { cleanup() }
+  })
+
   it('excludes non-audio files from the manifest', async () => {
     const { handler, cleanup } = boot({
       musicFiles: { 'a.mp3': 'A', 'notes.txt': 'not audio', 'cover.jpg': 'img' },
