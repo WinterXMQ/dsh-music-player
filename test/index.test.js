@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileS
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { apply } from '../lib/index.js'
+import { apply, parseBookStructure } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' }) {
@@ -443,6 +443,208 @@ describe('dsh-music-player music_play tool', () => {
         const res = makeRes()
         await handler(makeReq({ url: '/dsh-music/intent' }), res)
         expect(JSON.parse(res.body)).toEqual({ action })
+      }
+    } finally { cleanup() }
+  })
+})
+
+describe('dsh-music-player parseBookStructure', () => {
+  it('splits a novel into 简介 / chapters / 尾声 and derives title+author', () => {
+    const text = [
+      '中国制造 作者：周梅森',
+      '',
+      '简介',
+      '这是一段简介内容，概述全书。',
+      '',
+      '第一章　闪电划过星空',
+      '这是第一章的正文，情节展开。',
+      '',
+      '第二章　最长的一天',
+      '这是第二章的正文，剧情继续。',
+      '',
+      '尾声',
+      '这就是尾声了。',
+    ].join('\n')
+    const st = parseBookStructure(text, '中国制造 作者：周梅森.txt')
+    expect(st.title).toBe('中国制造')
+    expect(st.author).toBe('周梅森')
+    const types = st.sections.map((s) => s.type)
+    expect(types).toEqual(['preface', 'chapter', 'chapter', 'epilogue'])
+    expect(st.sections[1].heading).toContain('第一章')
+  })
+
+  it('recognizes standalone short-line (named) section headings like 麻将牌', () => {
+    const text = [
+      '县级夫人 作者：杨晓升',
+      '',
+      '麻将牌',
+      '男人当道，女人当家。这是正文第一段，文字很长很长很长很长很长。' + '正文。'.repeat(220),
+      '',
+      '青远县',
+      '这也是一个分节的正文段落，内容同样足够长，足以视为正文。' + '正文。'.repeat(220),
+      '',
+      '尾声',
+      '结束了。',
+    ].join('\n')
+    const st = parseBookStructure(text, '县级夫人 作者：杨晓升.txt')
+    expect(st.sections.map((s) => s.type)).toEqual(['named', 'named', 'epilogue'])
+    expect(st.sections[0].heading).toBe('麻将牌')
+    expect(st.sections[1].heading).toBe('青远县')
+  })
+
+  it('rejects a run of short lyric lines as headings', () => {
+    const text = [
+      '第一章',
+      '这是第一章的正文第一行。',
+      '',
+      '能不能让我陪着你走',
+      '既然你说留不住你',
+      '回去的路有些黑暗',
+      '担心让你一个人走',
+      '',
+      '第二章',
+      '这是第二章的正文。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    const chapters = st.sections.filter((s) => s.type === 'chapter')
+    expect(chapters.length).toBe(2)
+    // none of the lyric lines became a section
+    for (const s of st.sections) {
+      expect(['能不能', '既然', '回去', '担心']).not.toContain(s.heading.slice(0, 2))
+    }
+  })
+
+  it('suppresses a duplicated 目录 TOC block', () => {
+    const text = [
+      '目录',
+      '第一章　标题一',
+      '第二章　标题二',
+      '第三章　标题三',
+      '',
+      '第一章　标题一',
+      '这是第一章正文。很长很长。',
+      '',
+      '第二章　标题二',
+      '这是第二章正文。很长很长。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    // only the two real chapters; the toc block must not produce sections
+    expect(st.sections.map((s) => s.type)).toEqual(['chapter', 'chapter'])
+  })
+
+  it('suppresses TOC rows that carry trailing page-number refs (…/12)', () => {
+    const text = [
+      '第一章 标题一',
+      '1. 小节一——一句话介绍。/1',
+      '2. 小节二——一句话介绍。/4',
+      '',
+      '第一章 标题一',
+      '这是第一章正文，内容很长很长很长很长很长很长很长很长很长。',
+      '',
+      '第二章 标题二',
+      '1. 小节甲——一句话介绍。/9',
+      '2. 小节乙——一句话介绍。/12',
+      '',
+      '第二章 标题二',
+      '这是第二章正文，内容同样很长很长很长很长很长很长很长很长。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    // only the two real chapters survive; the /N-page-ref rows are suppressed
+    expect(st.sections.map((s) => s.type)).toEqual(['chapter', 'chapter'])
+  })
+
+  it('strips WPS typesetting codes before classification', () => {
+    const text = '第一章\n正文内容很长。\n\n〖BT3〗第二章\n第二段正文。\n'
+    const st = parseBookStructure(text, 'novel.txt')
+    expect(st.sections.map((s) => s.type)).toEqual(['chapter', 'chapter'])
+    expect(st.sections[1].heading).toBe('第二章')
+  })
+
+  it('folds a tiny named section back into the previous section (noise gate)', () => {
+    const text = [
+      '第一章',
+      '这是第一章正文，很长很长的一段文字内容，足够长了。',
+      '',
+      '小节',
+      '这是一段超过二十个字的短正文内容。它只有这一段。',
+      '',
+      '第二章',
+      '这是第二章正文内容。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    expect(st.sections.map((s) => s.type)).toEqual(['chapter', 'chapter'])
+  })
+
+  it('accepts a strong heading with no blank line above it', () => {
+    const text = [
+      '第一部 禁地',
+      '这是第一部的正文。',
+      '第二部 荒 村',
+      '这是第二部的正文。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    expect(st.sections.map((s) => s.type)).toEqual(['part', 'part'])
+    expect(st.sections[1].heading).toBe('第二部 荒 村')
+  })
+
+  it('reports a valid textStart (offset in the normalized text) per section', () => {
+    const text = [
+      '第一章 标题甲',
+      '这是第一章正文，句子足够长。',
+      '',
+      '第二章 标题乙',
+      '这是第二章正文，句子足够长。',
+    ].join('\n')
+    const st = parseBookStructure(text, 'novel.txt')
+    expect(st.sections.length).toBe(2)
+    const norm = text.replace(/\uFEFF/g, '').replace(/\r\n?/g, '\n')
+    for (const s of st.sections) {
+      expect(typeof s.textStart).toBe('number')
+      expect(s.textStart).toBeGreaterThanOrEqual(0)
+      expect(s.textStart).toBeLessThan(norm.length)
+      // the offset points at the heading text in the normalized source
+      expect(norm.slice(s.textStart, s.textStart + s.heading.length)).toContain(
+        s.heading.replace(/\s+/g, '').slice(0, 2),
+      )
+    }
+    // section offsets are increasing
+    expect(st.sections[1].textStart).toBeGreaterThan(st.sections[0].textStart)
+  })
+})
+
+describe('dsh-music-player book structure meta route', () => {
+  it('returns title/author/sections with monotonic fromChunk from /book/<id>/meta', async () => {
+    const text = [
+      '真相 作者：石楠',
+      '',
+      '第一章',
+      '这是第一章正文，句子长度足以形成多个分块。',
+      '',
+      '第二章',
+      '这是第二章正文。',
+      '',
+      '尾声',
+      '结束了。',
+    ].join('\n')
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': text } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/meta' }), res)
+      expect(res.status).toBe(200)
+      const data = JSON.parse(res.body)
+      expect(data.title).toBe('真相')
+      expect(data.author).toBe('石楠')
+      expect(Array.isArray(data.sections)).toBe(true)
+      expect(data.sections.length).toBeGreaterThan(0)
+      // fromChunk is a valid chunk index and non-decreasing across sections
+      let prev = -1
+      for (const sec of data.sections) {
+        expect(sec.fromChunk).toBeGreaterThanOrEqual(0)
+        expect(sec.fromChunk).toBeLessThan(data.total)
+        expect(sec.fromChunk).toBeGreaterThanOrEqual(prev)
+        expect(typeof sec.heading).toBe('string')
+        expect(sec.heading.length).toBeGreaterThan(0)
+        prev = sec.fromChunk
       }
     } finally { cleanup() }
   })
