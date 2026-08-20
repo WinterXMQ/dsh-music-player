@@ -107,7 +107,7 @@
 |---|---|---|
 | M1 | Host：歌单 CRUD+reorder+持久化+`pl-fav`+manifest 扩展+`/file`+`/files` 路由+单测 | ~260 行 + 测试 ~160 行 |
 | M2 | Web：音乐页子 tab（曲库/❤/＋）+ 歌单详情（添加歌曲/移除/↑↓排序/重命名/删除）+ 文件多选器 | ~260 行 |
-| M3 | 播放条爱心按钮 + 范围徽标 + `activeIds()` 引擎重构 + scope 恢复 | ~150 行 |
+| M3 | 播放条爱心按钮 + `activeIds()` 引擎重构 + scope 恢复 | ~150 行 |
 | M4 | `music_play` `playlist` 参数 + README/CONTRIBUTING 更新 + 测试补全 | ~100 行 |
 
 每步 `npm test` 全绿 + 本地 `dsh plugin add ./` link 验证。

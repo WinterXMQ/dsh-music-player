@@ -13,13 +13,14 @@ dsh-music-player/
 │   └── playlists-design.md # 自建歌单功能设计定稿（v3）
 ├── cordis.patch.yml # 把插件行插入 profile 的 bundle patch
 ├── test/
-│   └── index.test.js # vitest 测试（用假 ctx + 临时目录驱动真实路由）
+│   ├── index.test.js  # Host 端 vitest（假 ctx + 临时目录驱动真实路由）
+│   └── client.test.js # Web 端渲染冒烟/交互测试（jsdom + react-dom）
 └── package.json      # 声明 dsh.bundle manifest 与 test/ci scripts
 ```
 
 ## Setup / 环境准备
 
-需要 Node.js ≥ 20（vitest 建议 20.19+） 与 npm。目前开发依赖仅 `vitest`：
+需要 Node.js ≥ 20（vitest 建议 20.19+） 与 npm。开发依赖：`vitest` + `react`/`react-dom`/`jsdom`（用于前端渲染冒烟测试）：
 
 ```sh
 npm install

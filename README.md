@@ -4,7 +4,7 @@
 
 DeepSeek Harness 本地音乐 + AI 讲书插件（bundle）。
 
-在 Host 进程扫描本地音乐目录（默认 `~/Music`，可在面板里改）并以 HTTP Range 流式给浏览器提供音频；浏览器侧提供**正在播放条**（上一首/播放暂停/下一首/停止、播放模式、音量、实时频谱）与浮动的**播放面板**（曲目列表 / 目录设置）。支持 **AI 讲书**：本地 `.txt` 小说经 MiMo TTS 合成朗读，自动识别书名/前言/章节/尾声，可跳章、可选声音。同时注册 `music_play` 模型工具，让 agent 可按关键词播放音乐或启动讲书。
+在 Host 进程扫描本地音乐目录（默认 `~/Music`，可在面板里改）并以 HTTP Range 流式给浏览器提供音频；浏览器侧提供**正在播放条**（上一首/播放暂停/下一首/停止、播放模式、音量、实时频谱）与浮动的**播放面板**（曲目列表 / 自建歌单 / 目录设置）。支持 **AI 讲书**：本地 `.txt` 小说经 MiMo TTS 合成朗读，自动识别书名/前言/章节/尾声，可跳章、可选声音。同时注册 `music_play` 模型工具，让 agent 可按关键词播放音乐或启动讲书。
 
 ## 特性
 
@@ -67,8 +67,8 @@ dsh plugin --profile <profile> add ./dsh-music-player-0.1.0.tgz
 
 插件为「Host 端 + Web 端」双面结构：
 
-- Host 端（`lib/index.js`）：音乐扫描、HTTP 流式、`music_play` 工具、AI 讲书（小说结构解析 + TTS 合成）
-- Web 端（`lib/client.js`）：浏览器里的播放条 / 播放面板 / 频谱 / 讲书控制
+- Host 端（`lib/index.js`）：音乐扫描、HTTP 流式、歌单 CRUD/持久化、`music_play` 工具、AI 讲书（小说结构解析 + TTS 合成）
+- Web 端（`lib/client.js`）：浏览器里的播放条 / 播放面板 / 频谱 / 歌单（收藏、一键清空）/ 讲书控制
 
 两者由一个 `cordis.patch.yml` 插入 `music-player` 行并自动组对（在 Web 端 `dsh.client` 声明即指回该行名并加载浏览器半体）：
 
