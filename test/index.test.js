@@ -695,3 +695,256 @@ describe('dsh-music-player book structure meta route', () => {
     } finally { cleanup() }
   })
 })
+
+describe('dsh-music-player playlists', () => {
+  // helper: run a JSON POST and return the parsed body
+  async function post(handler, url, payload) {
+    const res = makeRes()
+    await handler(
+      makeReq({ method: 'POST', url, body: JSON.stringify(payload) }),
+      res,
+    )
+    return { status: res.status, data: JSON.parse(res.body) }
+  }
+
+  it('exposes the fixed system playlist 我最喜欢 in the manifest', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(Array.isArray(data.playlists)).toBe(true)
+      const fav = data.playlists.find((p) => p.id === 'pl-fav')
+      expect(fav).toBeTruthy()
+      expect(fav.name).toBe('我最喜欢')
+      expect(fav.fixed).toBe(true)
+      expect(fav.count).toBe(0)
+      expect(fav.tracks).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('creates a custom playlist and reports it in the manifest', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const r = await post(handler, '/dsh-music/playlist', { name: '通勤' })
+      expect(r.status).toBe(200)
+      expect(r.data.ok).toBe(true)
+      expect(r.data.playlist.id).toMatch(/^pl-/)
+      expect(r.data.playlist.name).toBe('通勤')
+      expect(r.data.playlist.fixed).toBe(false)
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const names = JSON.parse(res.body).playlists.map((p) => p.name)
+      expect(names).toContain('通勤')
+    } finally { cleanup() }
+  })
+
+  it('rejects an empty playlist name', async () => {
+    const { handler, cleanup } = boot({ musicFiles: {} })
+    try {
+      const r = await post(handler, '/dsh-music/playlist', { name: '   ' })
+      expect(r.status).toBe(400)
+      expect(r.data.ok).toBe(false)
+    } finally { cleanup() }
+  })
+
+  it('adds audio files to a playlist (dedup, skip invalid) and streams them via /file', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'extra/clip.mp3': 'CLIPDATA', 'extra/notes.txt': 'nope' },
+      musicFiles: { 'a.mp3': 'A' },
+    })
+    try {
+      const clip = join(home, 'extra', 'clip.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const id = created.data.playlist.id
+      // adding the same path twice should dedup; a .txt must be skipped
+      const add = await post(handler, '/dsh-music/playlist/add', {
+        id, paths: [clip, clip, join(home, 'extra', 'notes.txt')],
+      })
+      expect(add.data.ok).toBe(true)
+      expect(add.data.added).toBe(1)
+      expect(add.data.playlist.count).toBe(1)
+      expect(add.data.playlist.missing).toBe(0)
+      expect(add.data.playlist.tracks[0].name).toBe('clip.mp3')
+      expect(add.data.playlist.tracks[0].url.startsWith('/dsh-music/file?path=')).toBe(true)
+      expect(add.data.playlist.tracks[0].size).toBe('CLIPDATA'.length)
+      // the generic streaming route serves the playlist member
+      const res = makeRes()
+      await handler(makeReq({ url: add.data.playlist.tracks[0].url }), res)
+      expect(res.status).toBe(200)
+      expect(res.headers['Content-Type']).toBe('audio/mpeg')
+      expect(Buffer.from(res.body).toString()).toBe('CLIPDATA')
+    } finally { cleanup() }
+  })
+
+  it('streams a playlist member with Range (206) via /file', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'extra/clip.mp3': 'ABCDEFGHIJ' },
+    })
+    try {
+      const clip = join(home, 'extra', 'clip.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      await post(handler, '/dsh-music/playlist/add', { id: created.data.playlist.id, paths: [clip] })
+      const res = makeRes()
+      await handler(makeReq({
+        url: '/dsh-music/file?path=' + encodeURIComponent(clip),
+        headers: { range: 'bytes=2-5' },
+      }), res)
+      expect(res.status).toBe(206)
+      expect(res.headers['Content-Range']).toBe('bytes 2-5/10')
+      expect(Buffer.from(res.body).toString()).toBe('CDEF')
+    } finally { cleanup() }
+  })
+
+  it('rejects /file for an unregistered path with 403 and a missing file with 404', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'secret.mp3': 'SECRET', 'm/clip.mp3': 'CLIP' },
+    })
+    try {
+      const secret = join(home, 'secret.mp3')
+      // never added to any playlist -> not registered
+      const forbidden = makeRes()
+      await handler(makeReq({ url: '/dsh-music/file?path=' + encodeURIComponent(secret) }), forbidden)
+      expect(forbidden.status).toBe(403)
+      // register a real file, then delete it from disk -> still registered, now 404
+      const clip = join(home, 'm', 'clip.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      await post(handler, '/dsh-music/playlist/add', { id: created.data.playlist.id, paths: [clip] })
+      rmSync(clip, { force: true })
+      const gone = makeRes()
+      await handler(makeReq({ url: '/dsh-music/file?path=' + encodeURIComponent(clip) }), gone)
+      expect(gone.status).toBe(404)
+    } finally { cleanup() }
+  })
+
+  it('removes tracks from a playlist', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'm/a.mp3': 'A', 'm/b.mp3': 'B' },
+    })
+    try {
+      const a = join(home, 'm', 'a.mp3')
+      const b = join(home, 'm', 'b.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const id = created.data.playlist.id
+      await post(handler, '/dsh-music/playlist/add', { id, paths: [a, b] })
+      const rm = await post(handler, '/dsh-music/playlist/remove', { id, paths: [a] })
+      expect(rm.data.removed).toBe(1)
+      expect(rm.data.playlist.tracks.map((t) => t.name)).toEqual(['b.mp3'])
+    } finally { cleanup() }
+  })
+
+  it('reorders playlist members, appending unmentioned ones at the end', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'm/a.mp3': 'A', 'm/b.mp3': 'B', 'm/c.mp3': 'C' },
+    })
+    try {
+      const a = join(home, 'm', 'a.mp3')
+      const b = join(home, 'm', 'b.mp3')
+      const c = join(home, 'm', 'c.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const id = created.data.playlist.id
+      await post(handler, '/dsh-music/playlist/add', { id, paths: [a, b, c] })
+      const re = await post(handler, '/dsh-music/playlist/reorder', { id, paths: [c, a] })
+      expect(re.data.ok).toBe(true)
+      expect(re.data.playlist.tracks.map((t) => t.name)).toEqual(['c.mp3', 'a.mp3', 'b.mp3'])
+    } finally { cleanup() }
+  })
+
+  it('renames a custom playlist but rejects renaming the fixed one', async () => {
+    const { handler, cleanup } = boot({ musicFiles: {} })
+    try {
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const ok = await post(handler, '/dsh-music/playlist/rename', { id: created.data.playlist.id, name: '新名字' })
+      expect(ok.data.ok).toBe(true)
+      expect(ok.data.playlist.name).toBe('新名字')
+      const fixed = await post(handler, '/dsh-music/playlist/rename', { id: 'pl-fav', name: '改' })
+      expect(fixed.status).toBe(400)
+      expect(fixed.data.ok).toBe(false)
+    } finally { cleanup() }
+  })
+
+  it('deletes a custom playlist but rejects deleting the fixed one', async () => {
+    const { handler, cleanup } = boot({ musicFiles: {} })
+    try {
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const ok = await post(handler, '/dsh-music/playlist/delete', { id: created.data.playlist.id })
+      expect(ok.data.ok).toBe(true)
+      const fixed = await post(handler, '/dsh-music/playlist/delete', { id: 'pl-fav' })
+      expect(fixed.status).toBe(400)
+      expect(fixed.data.ok).toBe(false)
+    } finally { cleanup() }
+  })
+
+  it('persists playlists to the state file and reloads a pre-seeded file', async () => {
+    const { handler, home, cleanup } = boot({
+      files: {
+        '.dsh/music-player-playlists.json': JSON.stringify({
+          version: 1,
+          playlists: [{ id: 'pl-seed', name: '预置歌单', fixed: false, trackPaths: [], createdAt: 1, updatedAt: 1 }],
+        }),
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const names = JSON.parse(res.body).playlists.map((p) => p.name)
+      expect(names).toContain('预置歌单') // loaded from the pre-seeded file
+      expect(names).toContain('我最喜欢') // system playlist still guaranteed
+      // a create writes the file back
+      await post(handler, '/dsh-music/playlist', { name: '持久' })
+      const file = join(home, '.dsh', 'music-player-playlists.json')
+      expect(existsSync(file)).toBe(true)
+      const saved = JSON.parse(readFileSync(file, 'utf8'))
+      expect(saved.playlists.map((p) => p.name)).toContain('持久')
+    } finally { cleanup() }
+  })
+
+  it('lists directories plus audio files (excluding others) via /files', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'Music/sub/song.mp3': 'A', 'Music/a.mp3': 'B', 'Music/b.mp3': 'C', 'Music/notes.txt': 'x' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/files?path=' + encodeURIComponent(join(home, 'Music')) }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.dirs.map((d) => d.name)).toEqual(['sub'])
+      const fileNames = data.files.map((f) => f.name).sort()
+      expect(fileNames).toEqual(['a.mp3', 'b.mp3'])
+      for (const f of data.files) expect(typeof f.path).toBe('string')
+    } finally { cleanup() }
+  })
+
+  it('plays a playlist via the music_play playlist param', async () => {
+    const { handler, tools, home, cleanup } = boot({
+      files: { 'm/a.mp3': 'A', 'm/b.mp3': 'B' },
+    })
+    try {
+      const created = await post(handler, '/dsh-music/playlist', { name: '最爱' })
+      const pl = created.data.playlist
+      await post(handler, '/dsh-music/playlist/add', { id: pl.id, paths: [join(home, 'm', 'a.mp3')] })
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ playlist: '最爱' })
+      expect(out.played).toBe(true)
+      expect(out.matches).toBe(1)
+      expect(out.track).toBe('a.mp3')
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      const intent = JSON.parse(res.body)
+      expect(intent.action).toBe('play')
+      expect(intent.playlistId).toBe(pl.id)
+      expect(intent.playlistName).toBe('最爱')
+      expect(intent.id).toBeTruthy()
+    } finally { cleanup() }
+  })
+
+  it('reports an unknown playlist name via music_play', async () => {
+    const { tools, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ playlist: '不存在的歌单' })
+      expect(out.played).toBe(false)
+      expect(out.notice).toContain('没有找到歌单')
+    } finally { cleanup() }
+  })
+})

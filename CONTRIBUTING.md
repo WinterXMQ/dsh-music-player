@@ -7,8 +7,10 @@ Thanks for wanting to contribute to **dsh-music-player**! / 感谢你参与 dsh-
 ```
 dsh-music-player/
 ├── lib/
-│   ├── index.js     # Host 端：音乐扫描、HTTP 流式、music_play 工具
-│   └── client.js    # Web 端：浏览器里的播放条 / 播放面板 / 频谱
+│   ├── index.js     # Host 端：音乐扫描、HTTP 流式、歌单 CRUD、music_play 工具
+│   └── client.js    # Web 端：浏览器里的播放条 / 播放面板 / 频谱 / 歌单
+├── docs/
+│   └── playlists-design.md # 自建歌单功能设计定稿（v3）
 ├── cordis.patch.yml # 把插件行插入 profile 的 bundle patch
 ├── test/
 │   └── index.test.js # vitest 测试（用假 ctx + 临时目录驱动真实路由）
