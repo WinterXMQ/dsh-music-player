@@ -833,6 +833,33 @@ describe('dsh-music-player playlists', () => {
     } finally { cleanup() }
   })
 
+  it('clears a playlist entirely (including the fixed one) via /playlist/clear', async () => {
+    const { handler, home, cleanup } = boot({
+      files: { 'm/a.mp3': 'A', 'm/b.mp3': 'B' },
+    })
+    try {
+      const a = join(home, 'm', 'a.mp3')
+      const b = join(home, 'm', 'b.mp3')
+      const created = await post(handler, '/dsh-music/playlist', { name: 'P' })
+      const id = created.data.playlist.id
+      await post(handler, '/dsh-music/playlist/add', { id, paths: [a, b] })
+      const clr = await post(handler, '/dsh-music/playlist/clear', { id })
+      expect(clr.data.ok).toBe(true)
+      expect(clr.data.cleared).toBe(2)
+      expect(clr.data.playlist.count).toBe(0)
+      expect(clr.data.playlist.tracks).toEqual([])
+      // fixed 系统歌单也可以清空
+      await post(handler, '/dsh-music/playlist/add', { id: 'pl-fav', paths: [a] })
+      const clrFav = await post(handler, '/dsh-music/playlist/clear', { id: 'pl-fav' })
+      expect(clrFav.data.cleared).toBe(1)
+      expect(clrFav.data.playlist.fixed).toBe(true)
+      expect(clrFav.data.playlist.count).toBe(0)
+      // unknown id -> 404
+      const nf = await post(handler, '/dsh-music/playlist/clear', { id: 'pl-nope' })
+      expect(nf.status).toBe(404)
+    } finally { cleanup() }
+  })
+
   it('reorders playlist members, appending unmentioned ones at the end', async () => {
     const { handler, home, cleanup } = boot({
       files: { 'm/a.mp3': 'A', 'm/b.mp3': 'B', 'm/c.mp3': 'C' },
