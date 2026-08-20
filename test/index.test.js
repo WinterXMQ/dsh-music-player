@@ -446,6 +446,52 @@ describe('dsh-music-player music_play tool', () => {
       }
     } finally { cleanup() }
   })
+
+  it('plays a novel via music_play when the query matches only a book', async () => {
+    const { tools, handler, cleanup } = boot({
+      musicFiles: { 'song.mp3': 'A', '真相 作者：石楠.txt': '第一章\n这是正文。' },
+    })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ query: '真相' })
+      expect(out.played).toBe(true)
+      expect(out.kind).toBe('book')
+      expect(out.track).toContain('真相')
+      // the queued intent targets the novel for AI 讲书
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      const intent = JSON.parse(res.body)
+      expect(intent.action).toBe('play')
+      expect(intent.kind).toBe('book')
+      expect(intent.name).toContain('真相')
+    } finally { cleanup() }
+  })
+
+  it('plays the first novel when the library has music but the query hits no track', async () => {
+    const { tools, handler, cleanup } = boot({
+      musicFiles: { 'song.mp3': 'A', '中国制造 作者：周梅森.txt': '第一章\n这是正文。' },
+    })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({ query: '中国制造' })
+      expect(out.played).toBe(true)
+      expect(out.kind).toBe('book')
+      expect(out.track).toContain('中国制造')
+    } finally { cleanup() }
+  })
+
+  it('plays the first novel when the library has no music at all', async () => {
+    const { tools, handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n这是正文。' } })
+    try {
+      const tool = tools.find((t) => t.name === 'music_play')
+      const out = await tool.execute({})
+      expect(out.played).toBe(true)
+      expect(out.kind).toBe('book')
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/intent' }), res)
+      expect(JSON.parse(res.body).kind).toBe('book')
+    } finally { cleanup() }
+  })
 })
 
 describe('dsh-music-player parseBookStructure', () => {
