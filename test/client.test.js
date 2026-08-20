@@ -127,6 +127,7 @@ function baseManifest() {
 
 beforeEach(async () => {
   vi.resetModules()
+  localStorage.clear()
   lastFilesUrl = null
   manifest = baseManifest()
   await bootClient()
@@ -210,5 +211,38 @@ describe('dsh-music-player client render smoke', () => {
     expect(lastFilesUrl).toContain(encodeURIComponent('/music'))
     // the picker shows the file it listed
     expect(container.textContent).toContain('a.mp3')
+  })
+
+  it('resizes the panel via the corner handle and persists w/h', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const handle = container.querySelector('.dsh-music-resize')
+    expect(handle).toBeTruthy()
+    const panelEl = container.querySelector('.dsh-music-panel')
+    // default: no inline geometry (CSS 380px / auto height)
+    expect(panelEl.style.width).toBe('')
+    const pointer = (type, x, y) => {
+      const ev = new Event(type, { bubbles: true })
+      ev.clientX = x; ev.clientY = y; ev.button = 0; ev.pointerId = 1
+      return ev
+    }
+    // drag the corner handle 100px right and 150px down
+    act(() => { handle.dispatchEvent(pointer('pointerdown', 800, 600)) })
+    act(() => { handle.dispatchEvent(pointer('pointermove', 900, 750)) })
+    expect(parseInt(panelEl.style.width, 10)).toBe(480)   // 380 + 100
+    expect(parseInt(panelEl.style.height, 10)).toBeGreaterThanOrEqual(200) // clamped min
+    expect(panelEl.style.maxHeight).toBe('none') // explicit height wins over 72vh
+    const saved = JSON.parse(localStorage.getItem('dsh-music-panel-pos'))
+    expect(saved).toMatchObject({ w: 480 })
+    expect(typeof saved.h).toBe('number')
+    // shrink back below the min clamps to 280
+    act(() => { handle.dispatchEvent(pointer('pointermove', 500, 300)) })
+    expect(parseInt(panelEl.style.width, 10)).toBe(280)
+    act(() => { handle.dispatchEvent(pointer('pointerup', 500, 300)) })
   })
 })
