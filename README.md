@@ -2,7 +2,7 @@
 
 [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
-DeepSeek Harness 本地音乐 + AI 讲书插件（bundle）。
+DeepSeek Harness 本地音乐/小说播放插件。
 
 写代码写累了、想摸鱼又不想切窗口？这个插件就是你的**摸鱼神器**——直接在 DeepSeek Harness 的网页里塞进一个本地音乐播放器：扫一下你电脑上的音乐目录（默认 `~/Music`）就能在浏览器里听歌，带播放条和可拖拽的播放面板，还能自己建歌单。
 
