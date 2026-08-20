@@ -57,11 +57,17 @@ function makePlaylist(id, name, fixed, paths) {
 function jsonRes(obj) {
   return Promise.resolve({ ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) })
 }
+// records the last /dsh-music/files path requested (to assert the initial dir)
+let lastFilesUrl = null
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
   if (u === '/dsh-music/manifest') return jsonRes(manifest)
   if (u === '/dsh-music/intent') return jsonRes(null)
+  if (u.startsWith('/dsh-music/files')) {
+    lastFilesUrl = u
+    return jsonRes({ path: '/music', name: 'Music', up: '/', dirs: [], files: [{ name: 'a.mp3', path: '/music/a.mp3', size: 10, ext: 'mp3' }] })
+  }
   if (u === '/dsh-music/playlist/clear') {
     const body = JSON.parse(o.body || '{}')
     const pl = (manifest.playlists || []).find((p) => p.id === body.id)
@@ -121,6 +127,7 @@ function baseManifest() {
 
 beforeEach(async () => {
   vi.resetModules()
+  lastFilesUrl = null
   manifest = baseManifest()
   await bootClient()
 })
@@ -179,5 +186,29 @@ describe('dsh-music-player client render smoke', () => {
     // flush the fetch .then -> store update -> re-render
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('歌单为空')
+  })
+
+  it('opens the file picker from 添加歌曲 starting at the music root directory', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const tab = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent === '通勤')
+    act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const addBtn = [...container.querySelectorAll('.dsh-music-playlist-btn')].find((b) => b.textContent.includes('添加歌曲'))
+    expect(addBtn).toBeTruthy()
+    act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // flush the FilePicker useEffect -> /dsh-music/files fetch
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // initial browse must point at the music root (/music), not home (empty)
+    expect(lastFilesUrl).toBeTruthy()
+    expect(lastFilesUrl).toMatch(/^\/dsh-music\/files\?path=/)
+    expect(lastFilesUrl).not.toMatch(/path=$/)
+    expect(lastFilesUrl).toContain(encodeURIComponent('/music'))
+    // the picker shows the file it listed
+    expect(container.textContent).toContain('a.mp3')
   })
 })
