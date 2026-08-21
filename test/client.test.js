@@ -59,11 +59,17 @@ function jsonRes(obj) {
 }
 // records the last /dsh-music/files path requested (to assert the initial dir)
 let lastFilesUrl = null
+// test hook: sections served for /dsh-music/book/*/meta (set before bootClient so
+// the refresh-restore path — which fetches meta during load — sees them too)
+let bookMetaSections = []
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
   if (u === '/dsh-music/manifest') return jsonRes(manifest)
   if (u === '/dsh-music/intent') return jsonRes(null)
+  if (u.includes('/dsh-music/book/') && u.endsWith('/meta')) {
+    return jsonRes({ id: 'b1', name: '测试小说', total: 25, title: '测试小说', author: '佚名', sections: bookMetaSections })
+  }
   if (u.startsWith('/dsh-music/files')) {
     lastFilesUrl = u
     return jsonRes({ path: '/music', name: 'Music', up: '/', dirs: [], files: [{ name: 'a.mp3', path: '/music/a.mp3', size: 10, ext: 'mp3' }] })
@@ -129,6 +135,7 @@ beforeEach(async () => {
   vi.resetModules()
   localStorage.clear()
   lastFilesUrl = null
+  bookMetaSections = []
   manifest = baseManifest()
   await bootClient()
 })
@@ -138,6 +145,8 @@ describe('dsh-music-player client render smoke', () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const html = renderToString(bar)
     expect(html).toContain('本地音乐播放器')
+    // idle state (no track) shows the music note icon
+    expect(html).toContain('M12 3v10.55')
   })
 
   it('opens the panel, shows subtabs, and renders the playlist detail with a 清空 button', async () => {
@@ -244,5 +253,122 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { handle.dispatchEvent(pointer('pointermove', 500, 300)) })
     expect(parseInt(panelEl.style.width, 10)).toBe(280)
     act(() => { handle.dispatchEvent(pointer('pointerup', 500, 300)) })
+  })
+
+  it('opens the chapter TOC scrolled to the currently playing chapter (not the top)', async () => {
+    // Re-boot with a book in the library so AI 讲书 (book) mode is available.
+    const book = { id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }
+    const sections = [
+      { type: 'preface', heading: '前言', fromChunk: 0 },
+      { type: 'chapter', heading: '第一章 起', fromChunk: 0 },
+      { type: 'chapter', heading: '第二章 承', fromChunk: 5 },
+      { type: 'chapter', heading: '第三章 转', fromChunk: 10 },
+      { type: 'epilogue', heading: '后记', fromChunk: 20 },
+    ]
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [book] }
+    vi.resetModules()
+    localStorage.clear()
+    lastFilesUrl = null
+    await bootClient()
+    // Serve the book's /meta (section structure); everything else falls back.
+    const baseFetch = globalThis.fetch
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url).endsWith('/meta')) return jsonRes({ total: 25, title: '测试小说', author: '佚名', sections })
+      return baseFetch(url, opts)
+    })
+    // jsdom has no scrollIntoView — spy on it to observe the TOC auto-scroll.
+    const scrollSpy = vi.fn()
+    Element.prototype.scrollIntoView = scrollSpy
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // open the panel -> 小说 tab -> start the book
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '小说')
+    expect(bookTab).toBeTruthy()
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('测试小说'))
+    expect(bookRow).toBeTruthy()
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // flush the async /meta fetch + chapter-structure state
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // jump forward twice: 第一章 -> 第二章 -> 第三章
+    const next = container.querySelector('button[title="下一章"]')
+    expect(next).toBeTruthy()
+    act(() => { next.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { next.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // open the chapter TOC — it must auto-scroll to the active (current) chapter
+    const tocBtn = container.querySelector('button[title="章节目录"]')
+    expect(tocBtn).toBeTruthy()
+    await act(async () => { tocBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); await new Promise((r) => setTimeout(r, 0)) })
+    const toc = container.querySelector('.dsh-music-toc-list')
+    expect(toc).toBeTruthy()
+    // the popup must be a child of the button's relative wrapper (same anchor
+    // pattern as the volume/mode popups — CSS positions it above the button)
+    const tocPanel = toc.closest('.dsh-music-toc')
+    expect(tocPanel).toBeTruthy()
+    expect(tocPanel.parentElement.classList.contains('dsh-music-toc-trigger')).toBe(true)
+    expect(tocPanel.parentElement.contains(tocBtn)).toBe(true)
+    // the popup uses the absolute-above-button positioning (no inline geometry)
+    expect(tocPanel.style.position).toBe('')
+    const activeItems = toc.querySelectorAll('.dsh-music-toc-item.active')
+    expect(activeItems.length).toBe(1)
+    expect(activeItems[0].textContent).toContain('第三章 转')
+    // scrollIntoView must have been called on that active item (never on the top row)
+    const tocScrollTargets = scrollSpy.mock.instances.filter((el) =>
+      el && el.classList && el.classList.contains('dsh-music-toc-item') && el.classList.contains('active'))
+    expect(tocScrollTargets.length).toBeGreaterThan(0)
+    expect(tocScrollTargets.some((el) => el.textContent.includes('第三章 转'))).toBe(true)
+    // the top (first) chapter must not have been the scroll target
+    expect(tocScrollTargets.some((el) => el.textContent.includes('第一章 起'))).toBe(false)
+  })
+
+  it('shows the restored chapter immediately after a refresh (no play needed)', async () => {
+    // Simulate a saved book playback at chunk 10 (第三章 转), then re-boot so
+    // restoreLatest() runs during load — the same path as a page refresh.
+    const sections = [
+      { type: 'preface', heading: '前言', fromChunk: 0 },
+      { type: 'chapter', heading: '第一章 起', fromChunk: 0 },
+      { type: 'chapter', heading: '第二章 承', fromChunk: 5 },
+      { type: 'chapter', heading: '第三章 转', fromChunk: 10 },
+      { type: 'epilogue', heading: '后记', fromChunk: 20 },
+    ]
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = sections
+    localStorage.setItem('dsh-music-books-playback', JSON.stringify({
+      '测试小说.txt': { from: 10, base: 300, pos: 3, total: 25, ts: 999999999 },
+    }))
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-time async /meta fetch so currentSection arrives
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // the section badge shows the restored chapter without any play interaction
+    const badge = container.querySelector('.dsh-music-bar-section')
+    expect(badge).toBeTruthy()
+    expect(badge.textContent).toContain('第三章 转')
+    // the book name is prefixed by a MIC icon (not the music note)
+    const nameIcon = container.querySelector('.dsh-music-bar-name .dsh-music-note path')
+    expect(nameIcon).toBeTruthy()
+    expect(nameIcon.getAttribute('d')).toContain('M12 14c')
+    // opening the TOC now highlights the restored chapter (not the first one)
+    const tocBtn = container.querySelector('button[title="章节目录"]')
+    expect(tocBtn).toBeTruthy()
+    await act(async () => { tocBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); await new Promise((r) => setTimeout(r, 0)) })
+    const active = container.querySelector('.dsh-music-toc-item.active')
+    expect(active).toBeTruthy()
+    expect(active.textContent).toContain('第三章 转')
   })
 })
