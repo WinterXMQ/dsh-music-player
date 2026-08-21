@@ -149,7 +149,7 @@ describe('dsh-music-player host routes', () => {
   it('lists .txt novels as books in the manifest', async () => {
     // Books share the default root with music until a separate book root is set.
     const { handler, musicDir, cleanup } = boot({
-      musicFiles: { 'a.mp3': 'AUDIO-A', 'novel.txt': '\u7b2c\u4e00\u7ae0 \u8d77\u6e90\u3002' },
+      musicFiles: { 'a.mp3': 'AUDIO-A', 'novel.txt': '第一章 起源。' },
     })
     try {
       const res = makeRes()
@@ -184,7 +184,7 @@ describe('dsh-music-player host routes', () => {
 
   it('synthesizing a book without a TTS key returns a clear error', async () => {
     const { handler, cleanup } = boot({
-      musicFiles: { 'novel.txt': 'Hey \u8fd9\u662f\u4e00\u6bb5\u5c0f\u8bf4\u6587\u672c\u3002' },
+      musicFiles: { 'novel.txt': 'Hey 这是一段小说文本。' },
     })
     try {
       const res = makeRes()
@@ -192,7 +192,7 @@ describe('dsh-music-player host routes', () => {
       // No key in the test env -> host returns 500 with a Chinese diagnostic,
       // not a crash.
       expect(res.status).toBe(500)
-      expect(String(res.body)).toContain('\u672a\u914d\u7f6e') // "未配置"
+      expect(String(res.body)).toContain('未配置') // "未配置"
     } finally { cleanup() }
   })
 
