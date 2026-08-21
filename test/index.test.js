@@ -768,6 +768,54 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
       expect(String(res.body)).toContain('非 PCM')
     } finally { restore(); cleanup(); vi.unstubAllGlobals() }
   })
+
+  it('resolves the TTS key from the DSH v1 refs:-nested credentials layout', async () => {
+    // DSH >= v1 stores keys under a refs: block at two-space indent.
+    const { handler, cleanup } = boot({
+      files: {
+        '.dsh/settings.yaml': 'llm-pi-ai:\n  providers:\n    xiaomi:\n      apiKeyEnv: XIAOMI_API_KEY\n',
+        '.dsh/.credentials.yaml': 'version: 1\nrefs:\n  XIAOMI_API_KEY: sk-from-refs\n',
+      },
+      musicFiles: { 'novel.txt': '第一章\n正文。' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(res.status).toBe(200)
+      const manifest = JSON.parse(res.body)
+      expect(manifest.ttsConfigured).toBe(true)
+      expect(manifest.ttsReason).toBe('ok')
+    } finally { cleanup() }
+  })
+
+  it('still resolves the TTS key from the legacy flat credentials layout', async () => {
+    // Pre-v1 DSH wrote keys at column 0; that layout must keep working.
+    const { handler, cleanup } = boot({
+      files: {
+        '.dsh/settings.yaml': 'llm-pi-ai:\n  providers:\n    xiaomi:\n      apiKeyEnv: XIAOMI_API_KEY\n',
+        '.dsh/.credentials.yaml': 'XIAOMI_API_KEY: sk-flat\n',
+      },
+      musicFiles: { 'novel.txt': '第一章\n正文。' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(res.status).toBe(200)
+      expect(JSON.parse(res.body).ttsConfigured).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('reports TTS as unconfigured when no xiaomi key is configured', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文。' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(res.status).toBe(200)
+      const manifest = JSON.parse(res.body)
+      expect(manifest.ttsConfigured).toBe(false)
+      expect(String(manifest.ttsReason)).toContain('未找到')
+    } finally { cleanup() }
+  })
 })
 
 describe('dsh-music-player playlists', () => {
