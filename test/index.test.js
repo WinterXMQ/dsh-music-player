@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileS
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { apply, parseBookStructure } from '../lib/index.js'
+import { apply, parseBookStructure, splitBookChunks } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' }) {
@@ -655,6 +655,82 @@ describe('dsh-music-player parseBookStructure', () => {
     }
     // section offsets are increasing
     expect(st.sections[1].textStart).toBeGreaterThan(st.sections[0].textStart)
+  })
+})
+
+describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => {
+  const norm = (t) => t.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, '')
+  const breaksOf = (st) => st.sections
+    .filter((s) => Number.isFinite(s.textStart) && s.textStart >= 0)
+    .map((s) => ({ start: s.textStart, text: s.heading }))
+
+  it('puts each clean chapter heading in its own chunk, body in the next', () => {
+    const text = [
+      '第一章　闪电划过星空',
+      '这是第一章的正文，情节开始展开。故事继续推进。',
+      '',
+      '第二章　最长的一天',
+      '这是第二章的正文，剧情继续发展。',
+    ].join('\n')
+    const n = norm(text)
+    const st = parseBookStructure(n, 'novel.txt')
+    const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
+    // two chapters -> heading chunks + body chunks
+    expect(fromChunkOfBreak).toEqual([0, 2])
+    expect(chunks[0]).toContain('第一章')
+    expect(chunks[0]).not.toContain('这是第一章的正文')
+    expect(chunks[1]).toContain('这是第一章的正文')
+    expect(chunks[2]).toContain('第二章')
+    expect(chunks[2]).not.toContain('这是第二章的正文')
+    expect(chunks[3]).toContain('这是第二章的正文')
+    // section opener = the heading chunk, monotonic
+    expect(fromChunkOfBreak[1]).toBeGreaterThan(fromChunkOfBreak[0])
+  })
+
+  it('does not merge the heading text into the following body chunk', () => {
+    const text = '第一章　起\n这是第一章正文，句子足够长，用来确认标题不粘进正文。'
+    const n = norm(text)
+    const st = parseBookStructure(n, 'novel.txt')
+    const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
+    expect(fromChunkOfBreak[0]).toBe(0)
+    expect(chunks[0]).toContain('第一章')
+    // body chunk starts with the actual prose, not the heading
+    expect(chunks[1]).toMatch(/^这是第一章正文/)
+  })
+
+  it('falls back to the old merge for an inline/polluted long heading (no crash, no giant heading chunk)', () => {
+    // heading + body on the same line: parseBookStructure already merged the
+    // whole line into `heading`, so it is longer than MAX_HEADING_CHARS and the
+    // chunker must keep the old merge behaviour instead of isolating a bogus
+    // "heading" that is actually most of a paragraph.
+    const text = '第一章 闪电划过星空 这是第一章的正文，情节开始展开，故事继续推进。\n\n第二章 最长的一天 这是第二章的正文，剧情继续发展。\n'
+    const n = norm(text)
+    const st = parseBookStructure(n, 'novel.txt')
+    const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
+    expect(chunks.length).toBeGreaterThan(0)
+    // both breaks still open chunks (monotonic) and every chunk is bounded by
+    // MAX_TTS_CHARS + a heading line, never the whole remaining text
+    expect(fromChunkOfBreak.length).toBe(2)
+    expect(fromChunkOfBreak[1]).toBeGreaterThan(fromChunkOfBreak[0])
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(150)
+  })
+
+  it('falls back gracefully when the heading cannot be matched in the source (e.g. WPS codes)', () => {
+    const text = '〖BT3〗第二章\n这是第二章的正文，内容很长。'
+    const n = norm(text)
+    const st = parseBookStructure(n, 'novel.txt')
+    const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
+    expect(chunks.length).toBeGreaterThan(0)
+    // the break still opens a chunk (fallback records it) and nothing crashes
+    expect(fromChunkOfBreak[0]).toBe(0)
+    expect(chunks.join('')).toContain('这是第二章的正文')
+  })
+
+  it('handles an empty / no-section book without crashing', () => {
+    const n = norm('这是一本没有章节标题的书。只有正文。')
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.length).toBe(1)
+    expect(chunks[0]).toContain('没有章节标题')
   })
 })
 
