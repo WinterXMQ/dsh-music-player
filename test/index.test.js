@@ -701,12 +701,16 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
   const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n, 0); return b }
   // Build a minimal WAV with a fmt chunk (defaults: PCM/1ch/24000Hz/16bit) and a
   // data chunk of the given bytes. Used to stub the MiMo TTS API response.
-  function pcmWav({ data = Buffer.alloc(0), fmt = 1, ch = 1, rate = 24000, bits = 16 } = {}) {
+  // `declaredDataSize`/`byteRate` override the header fields to fabricate the
+  // broken WAVs the API occasionally returns (truncated data / wrong byte rate).
+  function pcmWav({ data = Buffer.alloc(0), fmt = 1, ch = 1, rate = 24000, bits = 16, declaredDataSize, byteRate } = {}) {
+    const realByteRate = rate * ch * bits / 8
     const fmtChunk = Buffer.concat([
       Buffer.from('fmt ', 'ascii'), u32(16), u16(fmt), u16(ch), u32(rate),
-      u32(rate * ch * bits / 8), u16(ch * bits / 8), u16(bits),
+      u32(byteRate !== undefined ? byteRate : realByteRate), u16(ch * bits / 8), u16(bits),
     ])
-    const dataChunk = Buffer.concat([Buffer.from('data', 'ascii'), u32(data.length), data])
+    const declared = declaredDataSize !== undefined ? declaredDataSize : data.length
+    const dataChunk = Buffer.concat([Buffer.from('data', 'ascii'), u32(declared), data])
     const body = Buffer.concat([Buffer.from('WAVE', 'ascii'), fmtChunk, dataChunk])
     return Buffer.concat([Buffer.from('RIFF', 'ascii'), u32(body.length), body])
   }
@@ -727,7 +731,11 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
   it('serves a valid synthesized chunk as audio/wav with the exact bytes', async () => {
     const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。\n第二章\n更多正文。' } })
     const restore = withTtsKey()
-    const wav = pcmWav({ data: Buffer.from([0, 0, 1, 0, 2, 0, 3, 0]) })
+    // realistic 16-bit PCM samples at real-speech amplitude (peak ~16000), so the
+    // silence check passes
+    const sample = (v) => { const b = Buffer.alloc(2); b.writeInt16LE(v, 0); return b }
+    const data = Buffer.concat([sample(16000), sample(-16000), sample(8000), sample(-8000), sample(12000), sample(-12000), sample(2000), sample(-2000)])
+    const wav = pcmWav({ data })
     try {
       stubTts(wav)
       const res = makeRes()
@@ -766,6 +774,53 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
       await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
       expect(res.status).toBe(500)
       expect(String(res.body)).toContain('非 PCM')
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('rejects a truncated wav (declared data bigger than the buffer) with a 500', async () => {
+    // A truncated data chunk makes the browser report a long duration and play
+    // silence for the missing remainder — the "没声音但时长差几分钟" symptom.
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      stubTts(pcmWav({ data: Buffer.from([0, 0, 1, 0]), declaredDataSize: 100000 }))
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('被截断')
+      // the diagnosis is recorded with the wav header details
+      const lres = makeRes()
+      await handler(makeReq({ url: '/dsh-music/tts-logs' }), lres)
+      const logs = JSON.parse(lres.body).logs
+      const degen = logs.find((l) => l.kind === 'degenerate')
+      expect(degen).toBeTruthy()
+      expect(degen.wav.declared).toBe(100000)
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('rejects a wav whose byteRate disagrees with the header (inflated duration) with a 500', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      // byteRate is 1/10 of the real 48000 → browser would compute a 10x duration
+      stubTts(pcmWav({ data: Buffer.from([0, 0, 1, 0, 2, 0]), byteRate: 4800 }))
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('字节率异常')
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('rejects an all-silent wav (zero samples) with a 500', async () => {
+    // A correct-header but silent wav plays as silence for its whole duration.
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      stubTts(pcmWav({ data: Buffer.alloc(4096) })) // 4096 zero bytes = silent 16-bit PCM
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('静音')
     } finally { restore(); cleanup(); vi.unstubAllGlobals() }
   })
 
