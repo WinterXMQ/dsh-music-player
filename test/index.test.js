@@ -6,7 +6,7 @@
  * in a temporary directory. This exercises the actual route logic — manifest,
  * set-root, Range/seek streaming, 404, HEAD — against real bytes.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -693,6 +693,80 @@ describe('dsh-music-player book structure meta route', () => {
         prev = sec.fromChunk
       }
     } finally { cleanup() }
+  })
+})
+
+describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
+  const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b }
+  const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16LE(n, 0); return b }
+  // Build a minimal WAV with a fmt chunk (defaults: PCM/1ch/24000Hz/16bit) and a
+  // data chunk of the given bytes. Used to stub the MiMo TTS API response.
+  function pcmWav({ data = Buffer.alloc(0), fmt = 1, ch = 1, rate = 24000, bits = 16 } = {}) {
+    const fmtChunk = Buffer.concat([
+      Buffer.from('fmt ', 'ascii'), u32(16), u16(fmt), u16(ch), u32(rate),
+      u32(rate * ch * bits / 8), u16(ch * bits / 8), u16(bits),
+    ])
+    const dataChunk = Buffer.concat([Buffer.from('data', 'ascii'), u32(data.length), data])
+    const body = Buffer.concat([Buffer.from('WAVE', 'ascii'), fmtChunk, dataChunk])
+    return Buffer.concat([Buffer.from('RIFF', 'ascii'), u32(body.length), body])
+  }
+  // Point the TTS provider at a stub returning the given wav as base64 audio.
+  function stubTts(wav) {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { audio: { data: wav.toString('base64') } } }] }),
+    }))
+  }
+  // The plugin resolves its key from env/credentials; tests set MIMO_API_KEY.
+  function withTtsKey() {
+    const prev = process.env.MIMO_API_KEY
+    process.env.MIMO_API_KEY = 'test-key'
+    return () => { if (prev === undefined) delete process.env.MIMO_API_KEY; else process.env.MIMO_API_KEY = prev }
+  }
+
+  it('serves a valid synthesized chunk as audio/wav with the exact bytes', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。\n第二章\n更多正文。' } })
+    const restore = withTtsKey()
+    const wav = pcmWav({ data: Buffer.from([0, 0, 1, 0, 2, 0, 3, 0]) })
+    try {
+      stubTts(wav)
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(200)
+      expect(res.headers['Content-Type']).toBe('audio/wav')
+      const body = Buffer.isBuffer(res.body) ? res.body : Buffer.from(res.body)
+      expect(body.equals(wav)).toBe(true)
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('rejects a header-only (empty data) wav with a 500 and records the diagnosis', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      stubTts(pcmWav({})) // fmt present but data chunk empty
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('音频数据为空')
+      // the diagnosis is recorded and served at /tts-logs
+      const lres = makeRes()
+      await handler(makeReq({ url: '/dsh-music/tts-logs' }), lres)
+      expect(lres.status).toBe(200)
+      const logs = JSON.parse(lres.body).logs
+      expect(logs.some((l) => l.kind === 'degenerate')).toBe(true)
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('rejects a non-PCM wav (IEEE float) with a 500', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '第一章\n正文内容。' } })
+    const restore = withTtsKey()
+    try {
+      stubTts(pcmWav({ fmt: 3, data: Buffer.alloc(4) })) // fmt=3 = IEEE float
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0?from=0' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('非 PCM')
+    } finally { restore(); cleanup(); vi.unstubAllGlobals() }
   })
 })
 
