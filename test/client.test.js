@@ -179,6 +179,20 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).not.toContain('删除')
   })
 
+  it('exposes the full file path as the hover tooltip on a track row', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const trackBtn = container.querySelector('.dsh-music-track')
+    expect(trackBtn).toBeTruthy()
+    // manifest track a.mp3 carries path /music/a.mp3; hovering shows the whole path.
+    expect(trackBtn.getAttribute('title')).toBe('/music/a.mp3')
+  })
+
   it('clears a playlist to the empty state', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -220,6 +234,77 @@ describe('dsh-music-player client render smoke', () => {
     expect(lastFilesUrl).toContain(encodeURIComponent('/music'))
     // the picker shows the file it listed
     expect(container.textContent).toContain('a.mp3')
+  })
+
+  it('renders the directory picker as breadcrumbs with dirs first and inert files', async () => {
+    // Serve the directory listing the 选择音乐目录 picker fetches, with crumbs.
+    const dirFetch = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u.startsWith('/dsh-music/dir')) {
+        const target = decodeURIComponent((u.split('path=')[1] || ''))
+        if (target === '/music') {
+          return jsonRes({ path: '/music', name: 'music', up: '/', dirs: [{ name: 'Albums', path: '/music/Albums' }], files: [{ name: 'a.mp3', path: '/music/a.mp3' }, { name: 'cover.jpg', path: '/music/cover.jpg' }], crumbs: [{ name: '/', path: '/' }, { name: 'music', path: '/music' }] })
+        }
+        if (target === '/') {
+          return jsonRes({ path: '/', name: '/', up: null, dirs: [], files: [], crumbs: [{ name: '/', path: '/' }] })
+        }
+        return jsonRes({ path: target, name: target, up: null, dirs: [], files: [], crumbs: [] })
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('fetch', dirFetch)
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const pickBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '选择音乐目录')
+    expect(pickBtn).toBeTruthy()
+    act(() => { pickBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // breadcrumb: root ("/") is clickable, current ("music") is highlighted.
+    let crumbs = [...container.querySelectorAll('.dsh-music-picker-cur .dsh-music-crumb')]
+    expect(crumbs.length).toBe(2)
+    expect(crumbs[0].textContent).toBe('/')
+    expect(crumbs[0].tagName).toBe('BUTTON')
+    expect(crumbs[1].textContent).toBe('music')
+    expect(crumbs[1].className).toContain('cur')
+    // list: the directory comes first (clickable button), then files (inert spans).
+    const listItems = [...container.querySelectorAll('.dsh-music-picker-list .dsh-music-picker-item')]
+    expect(listItems.map((el) => el.textContent.trim())).toEqual(['📁 Albums', '📄 a.mp3', '📄 cover.jpg'])
+    expect(listItems[0].tagName).toBe('BUTTON')
+    expect(listItems[1].tagName).toBe('SPAN')
+    expect(listItems[2].tagName).toBe('SPAN')
+    expect(listItems[1].className).toContain('file')
+    // the empty hint no longer exists
+    expect(container.textContent).not.toContain('本目录下无子目录')
+    // click the root crumb -> re-browse to "/" and the path collapses to a single crumb.
+    act(() => { crumbs[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    crumbs = [...container.querySelectorAll('.dsh-music-picker-cur .dsh-music-crumb')]
+    expect(crumbs.length).toBe(1)
+    expect(crumbs[0].textContent).toBe('/')
+    expect(crumbs[0].className).toContain('cur')
+  })
+
+  it('shows the configured root before the picker button with a full-path hover tooltip', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // The path in front of the 选择音乐目录 button is plain text (truncatable) whose
+    // hover title is the full absolute path. It is NOT clickable (no breadcrumb).
+    const cur = container.querySelector('.dsh-music-settings-cur')
+    expect(cur).toBeTruthy()
+    expect(cur.textContent).toContain('/music')
+    expect(cur.getAttribute('title')).toBe('/music')
+    expect(cur.querySelector('.dsh-music-crumb')).toBeNull()
   })
 
   it('resizes the panel via the corner handle and persists w/h', async () => {

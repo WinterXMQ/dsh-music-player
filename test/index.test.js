@@ -316,12 +316,13 @@ describe('dsh-music-player host routes', () => {
 })
 
 describe('dsh-music-player /dir route', () => {
-  it('lists subdirectories with parent/up info', async () => {
+  it('lists subdirectories with parent/up info and files after them', async () => {
     const { handler, home, cleanup } = boot({
       files: {
         'Music/sub-a/song.mp3': 'A',
         'Music/sub-b/song.mp3': 'B',
         'Music/notes.txt': 'not a dir',
+        'Music/cover.jpg': 'img',
       },
     })
     try {
@@ -331,8 +332,12 @@ describe('dsh-music-player /dir route', () => {
       expect(res.status).toBe(200)
       expect(data.name).toBe('Music')
       expect(data.up).toBe(home)
-      const names = data.dirs.map((d) => d.name).sort()
-      expect(names).toEqual(['sub-a', 'sub-b']) // files excluded
+      // directories come first
+      const dirNames = data.dirs.map((d) => d.name)
+      expect(dirNames).toEqual(['sub-a', 'sub-b'])
+      // plain files are listed as context (not only audio)
+      const fileNames = data.files.map((f) => f.name)
+      expect(fileNames).toEqual(['cover.jpg', 'notes.txt'])
     } finally { cleanup() }
   })
 
@@ -345,6 +350,45 @@ describe('dsh-music-player /dir route', () => {
       const data = JSON.parse(res.body)
       expect(res.status).toBe(200)
       expect(data.up).toBe(null)
+    } finally { cleanup() }
+  })
+
+  it('returns breadcrumb crumbs that walk the full absolute path', async () => {
+    const { handler, home, cleanup } = boot({ files: { 'Music/sub-a/song.mp3': 'A' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/dir?path=' + encodeURIComponent(join(home, 'Music')) }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(Array.isArray(data.crumbs)).toBe(true)
+      expect(data.crumbs.length).toBeGreaterThanOrEqual(2)
+      // The deepest crumb is the current directory itself.
+      const last = data.crumbs[data.crumbs.length - 1]
+      expect(last.name).toBe('Music')
+      expect(last.path).toBe(data.path)
+      // The home directory appears as an ancestor crumb that accumulates to `home`.
+      const homeCrumb = data.crumbs.find((c) => c.path === home)
+      expect(homeCrumb).toBeTruthy()
+      expect(homeCrumb.name).toBe(home.replace(/[\\/]+$/, '').split(/[\\/]/).pop())
+      // Crumbs accumulate from the root: each path is a strict prefix of the next.
+      for (let i = 1; i < data.crumbs.length; i += 1) {
+        expect(data.crumbs[i].path.startsWith(data.crumbs[i - 1].path)).toBe(true)
+      }
+    } finally { cleanup() }
+  })
+
+  it('returns a valid crumb walk for the __drives__ sentinel', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'A' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/dir?path=__drives__' }), res)
+      const data = JSON.parse(res.body)
+      // On non-Windows the sentinel resolves to the POSIX root ("/").
+      expect(Array.isArray(data.crumbs)).toBe(true)
+      expect(data.crumbs.length).toBeGreaterThanOrEqual(0)
+      if (data.crumbs.length > 0) {
+        expect(data.crumbs[data.crumbs.length - 1].path).toBe(data.path)
+      }
     } finally { cleanup() }
   })
 
