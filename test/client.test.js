@@ -456,4 +456,153 @@ describe('dsh-music-player client render smoke', () => {
     expect(active).toBeTruthy()
     expect(active.textContent).toContain('第三章 转')
   })
+
+  it('double-clicking a track plays it without pausing or showing an autoplay-block error', async () => {
+    // Capture the <audio> elements the plugin creates and mimic the real
+    // browser: pause() aborts a still-pending play() promise with AbortError.
+    // That is exactly the path that previously produced the bogus
+    // "浏览器拦截了自动播放" message when a double-click's second click toggled
+    // the just-started track to paused.
+    const audios = []
+    class PendingPlayAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      play() {
+        this.paused = false
+        this._playPromise = new Promise((res, rej) => { this._resolve = res; this._reject = rej })
+        return this._playPromise
+      }
+      pause() {
+        this.paused = true
+        if (this._reject) {
+          const rej = this._reject
+          this._reject = null
+          rej(Object.assign(new Error('The play() request was interrupted by a call to pause().'), { name: 'AbortError' }))
+        }
+      }
+    }
+    // Re-boot with the pending-play Audio stub (fresh module = fresh instances).
+    vi.resetModules()
+    registered = []
+    localStorage.clear()
+    lastFilesUrl = null
+    manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', PendingPlayAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    // audios[0] is the main <audio>; audios[1] is the hidden preload element.
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const trackBtn = container.querySelector('.dsh-music-track')
+    expect(trackBtn).toBeTruthy()
+
+    // First click of a double-click starts the track (play promise stays pending).
+    act(() => { trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    // allow React to re-render (the row is now active) before the second click
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.paused).toBe(false)
+
+    // Second click of the double-click (detail: 2) must be ignored: the track
+    // keeps playing and no autoplay-block error is surfaced.
+    act(() => { trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.paused).toBe(false)
+    expect(container.textContent).not.toContain('浏览器拦截')
+    expect(container.textContent).not.toContain('自动播放')
+
+    // Some environments report detail=1 even for the second click of a double
+    // click — the time-window fallback must still ignore it.
+    act(() => { trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.paused).toBe(false)
+    expect(container.textContent).not.toContain('浏览器拦截')
+
+    // After the double-click window passes, a deliberate single click on the
+    // active track still toggles (pause) — and that pause aborts the pending
+    // play promise, which must NOT be misreported as an autoplay block.
+    await new Promise((r) => setTimeout(r, 650))
+    act(() => { trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.paused).toBe(true)
+    expect(container.textContent).not.toContain('浏览器拦截')
+    expect(container.textContent).not.toContain('自动播放')
+  })
+
+  it('shows a genuine autoplay-block error exactly once (no duplicate in the settings block)', async () => {
+    // A REAL autoplay block (NotAllowedError) must still surface the message —
+    // but only once, in the panel list area, never duplicated in the settings block.
+    const audios = []
+    class BlockedAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      play() {
+        this.paused = false
+        return Promise.reject(Object.assign(new Error("play() failed because the user didn't interact with the document first: https://goo.gl/xX8pDD"), { name: 'NotAllowedError' }))
+      }
+    }
+    vi.resetModules()
+    registered = []
+    localStorage.clear()
+    lastFilesUrl = null
+    manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', BlockedAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const trackBtn = container.querySelector('.dsh-music-track')
+    expect(trackBtn).toBeTruthy()
+
+    act(() => { trackBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    // flush the rejected play() promise -> error state -> re-render
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // the autoplay-block message IS shown (genuine block), exactly once
+    const errors = container.querySelectorAll('.dsh-music-error')
+    expect(errors.length).toBe(1)
+    expect(errors[0].textContent).toContain('浏览器拦截')
+    expect(errors[0].textContent).toContain('自动播放')
+  })
 })
