@@ -256,6 +256,11 @@ describe('dsh-music-player client render smoke', () => {
     const clearBtn = [...container.querySelectorAll('.dsh-music-playlist-btn')].find((b) => b.textContent === '清空')
     expect(clearBtn).toBeTruthy()
     act(() => { clearBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 自定义确认弹窗（ConfirmModal）替代原 window.confirm：点「确定」确认
+    const okBtn = [...container.querySelectorAll('.dsh-music-picker.confirm .dsh-music-picker-foot .dsh-music-settings-btn')].find((b) => b.textContent === '确定')
+    expect(okBtn).toBeTruthy()
+    act(() => { okBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // flush the fetch .then -> store update -> re-render
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('歌单为空')
