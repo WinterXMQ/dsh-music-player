@@ -23,9 +23,11 @@ DeepSeek Harness 本地音乐/小说播放插件。
 
 ## 截图
 
-![播放条](assets/screenshot-bar.png)
+![播放本地音乐](assets/screenshot-bar.png)
 
-![实时频谱](assets/screenshot-spectrum.png)
+![播放QQ音乐](assets/screenshot-qq.png)
+
+![播放AI讲书](assets/screenshot-spectrum.png)
 
 ![播放面板](assets/screenshot-panel.png)
 
@@ -117,17 +119,17 @@ dsh plugin --profile <profile> add ./dsh-music-player-0.1.0.tgz
   - 新歌：新歌速递（最新/内地/港台/欧美/韩国等）。
   - 搜索：搜歌曲与歌单，带搜索历史（localStorage，最近 10 条）。
 - **播放**：点击任意歌曲即可播放（同一播放条 + 频谱）；VIP 标识显示在歌名后，行尾显示歌手名。
-- **收藏**：播放条爱心按钮把当前在线曲目收藏到 QQ 音乐「我喜欢」（dirId 201）；已收藏歌曲爱心实时点亮。
+- **收藏**：播放条爱心按钮把当前在线曲目收藏到 QQ 音乐「我喜欢」，已收藏歌曲爱心实时点亮。
 - **续播**：在线播放进度（当前曲目 + 队列）刷新后自动恢复，点 ▶ 续播。
 - 在线曲目不占本地曲库的 500 首上限，与本地/讲书完全隔离。
 
 ## AI 讲书
 
-把本地 `.txt` 小说交给 AI 朗读（复用 DSH 已配置的 xiaomi/MiMo TTS）。**AI 语音目前仅支持 xiaomi 提供方（限时免费），请在设置中配置好再使用此功能。**
+把本地 `.txt` 小说交给 AI 朗读。**AI 语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。**
 
 ### 前置
 
-在 DSH 的模型设置里配置一个 xiaomi/MiMo TTS provider（含 api key）。未配置时，小说列表会提示"未配置 xiaomi/MiMo TTS 模型"。
+在 DSH 的模型设置里配置一个xiaomi提供方（含 api key）。未配置时，小说列表会提示"未配置xiaomi提供方"。
 
 ### 使用
 
