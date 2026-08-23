@@ -98,7 +98,7 @@ dsh plugin --profile <profile> add ./dsh-music-player-0.1.0.tgz
 
 ## 在线 QQ 音乐
 
-播放面板顶部切到「QQ音乐」页签即可在线听歌。**匿名可浏览/搜索/播放免费曲目；扫码登录后可播 VIP/高音质并访问「我的歌单」。**
+播放面板顶部切到「QQ音乐」页签即可在线听歌。**需先扫码登录**（QQ 登录或微信登录），登录后可浏览/搜索/播放并访问「我的歌单」，VIP 曲目可播高音质。
 
 > 合规提示：在线播放走 QQ 音乐非官方接口，仅供个人试听/学习，可能存在账号风控与合规风险，请知悉自担。
 
@@ -114,8 +114,6 @@ dsh plugin --profile <profile> add ./dsh-music-player-0.1.0.tgz
 - **收藏**：播放条爱心按钮把当前在线曲目收藏到 QQ 音乐「我喜欢」（dirId 201）；已收藏歌曲爱心实时点亮。
 - **续播**：在线播放进度（当前曲目 + 队列）刷新后自动恢复，点 ▶ 续播。
 - 在线曲目不占本地曲库的 500 首上限，与本地/讲书完全隔离。
-
-更详细的接口与设计见 [docs/online-music-feasibility.md](docs/online-music-feasibility.md) 与 [docs/online-music-ui-design.md](docs/online-music-ui-design.md)。
 
 ## AI 讲书
 

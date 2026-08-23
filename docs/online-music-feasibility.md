@@ -4,29 +4,16 @@
 > 实现方式：**QQ 音乐（腾讯系）**，Host 端直连 `musicu.fcg` / 传统 `y.qq.com` 端点，
 > 浏览器经 `/dsh-music` 同源代理流播。
 >
-> 状态：**已实现并落地**（登录 / 歌单 / 排行榜 / 新歌 / 搜索 / 收藏「我喜欢」），
-> 匿名可用，登录可解锁 VIP/高音质。
+> 状态：**已实现并落地**。**需扫码登录后使用**（QQ 登录或微信登录），登录后可用
+> 歌单 / 排行榜 / 新歌 / 搜索 / 播放 / 收藏「我喜欢」全部功能，VIP 曲目可播高音质。
 
 ---
 
-## 1. 方案选型（为何是 QQ 音乐）
+## 1. 方案概览
 
-早期文档基于 [metowolf/Meting](https://github.com/metowolf/Meting) 的多平台方案（网易云/酷狗/QQ/酷我/百度）。
-实测与最终落地时出现如下变化，故**放弃了 Meting 多平台方案，聚焦 QQ 音乐单一来源**：
-
-| 来源 | 实测结论（早期） | 最终取舍 |
-|---|---|---|
-| 网易云 | 搜索质量好、匿名可播 128k；VIP 原唱被翻唱顶掉 | 可作候选，但未接入 |
-| 酷狗 | 免费曲可播 7/10，接口频繁改版 | 未接入 |
-| **QQ 音乐** | 版权最全；匿名搜索正常；**匿名取链成功率低、VIP 门控** | **采用**：扫码/微信登录打通后取链可靠 |
-| 酷我 / 百度 | 已失效（接口损坏） | 不接入 |
-
-**为什么最终选择 QQ 音乐并打通登录**：
-
-1. **版权覆盖最全**：大量头部曲目在腾讯系，用户搜索命中率高。
-2. **登录链路可打通**：QQ 扫码（`ptqrlogin`）与微信扫码（`open.weixin.qq.com`）两条链路均实测可用，
-   登录后走 `musicu.fcg` 的 vkey 取链，VIP/高音质可靠。
-3. **接口体系稳定**：`musicu.fcg` 统一网关 + 传统 `fcg_*` 端点，结构清晰，便于维护。
+- **单一来源：QQ 音乐**。版权覆盖广，且扫码登录链路（QQ `ptqrlogin` / 微信 `open.weixin.qq.com`）可打通，
+  登录后走 `musicu.fcg` vkey 取链，VIP/高音质可靠。
+- **需登录使用**：未登录时 QQ 音乐页签仅显示登录入口，不发起浏览/搜索请求。
 
 ---
 
@@ -55,6 +42,8 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 
 ## 3. 已实现的接口清单（Host 端）
 
+> 以下接口均需登录态（Host 已持久化的 cookie）；未登录时接口返回未登录错误。
+
 ### 3.1 登录 / 状态
 
 | 方法 | 端点 | 说明 |
@@ -82,7 +71,7 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 | GET | `/dsh-music/qq/playlists?category=&page=` | 推荐歌单（空 category）或某分类歌单（分页，每页 20） |
 | GET | `/dsh-music/qq/playlist-search?w=` | 歌单搜索 |
 | GET | `/dsh-music/qq/playlist/<id>` | 歌单详情（含歌曲列表，带 `songmid`） |
-| GET | `/dsh-music/qq/my-playlists` | 我的歌单（登录后，当前账号创建/收藏） |
+| GET | `/dsh-music/qq/my-playlists` | 我的歌单（当前账号创建/收藏） |
 
 ### 3.4 发现（排行榜 / 新歌）
 
@@ -101,14 +90,15 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 
 ---
 
-## 4. 前端 UI（详见 ui-design 文档）
+## 4. 前端 UI
 
-- 播放面板新增顶级 tab「**QQ音乐**」（原「在线」），与「本地音乐」「AI讲书」并列。
+- 播放面板新增顶级 tab「**QQ音乐**」，与「本地音乐」「AI讲书」并列。
 - 未登录：仅显示两个居中登录按钮（QQ 登录 / 微信登录）+ 免责声明。
 - 登录后主 UI：顶部工具栏（进入播放列表 / 退出登录）+ 6 个子 tab：
   **我的歌单 / 推荐歌单 / 分类歌单 / 排行榜 / 新歌 / 搜索**。
 - 歌单/榜单以**卡片式**展示（封面图 + 名称 + 元信息）。
 - 搜索支持历史记录；收藏爱心按钮实时反映「我喜欢」状态。
+- 详细 UI 与交互见 [online-music-ui-design.md](online-music-ui-design.md)。
 
 ---
 
@@ -117,7 +107,6 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 ### 5.1 登录态 comm（musicu.fcg 必需字段）
 
 ```js
-// 匿名也通，但取链/我的歌单/收藏需登录态：
 {
   ct: 11, cv: 14090008, v: 14090008,
   tmeAppID: 'qqmusic', uid: uin, qq: uin, loginUin: uin,
