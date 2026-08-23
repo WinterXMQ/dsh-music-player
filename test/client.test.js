@@ -66,9 +66,13 @@ let bookMetaSections = []
 let qqLoggedIn = false
 // test hook: records /dsh-music/qq/fav POST bodies (action/song) for assertion.
 let favCalls = []
+// test hook: records every /dsh-music/qq/* URL fetched, for asserting the
+// "未登录不发外部请求 / 登录后才加载" gate.
+let qqFetchLog = []
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
+  if (String(u).startsWith('/dsh-music/qq/')) qqFetchLog.push(u.split('?')[0])
   if (u === '/dsh-music/qq/fav' && o && o.method === 'POST') {
     try { favCalls.push(JSON.parse(o.body || '{}')) } catch {}
     return jsonRes({ ok: true, faved: true })
@@ -180,6 +184,7 @@ beforeEach(async () => {
   bookMetaSections = []
   qqLoggedIn = false
   favCalls = []
+  qqFetchLog = []
   manifest = baseManifest()
   await bootClient()
 })
@@ -978,7 +983,10 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // 本地曲目无歌手：artist 元素应消失（不再残留周杰伦）
     expect(container.querySelector('.dsh-music-bar-artist')).toBeNull()
-    expect(container.textContent).not.toContain('周杰伦')
+    // bar 上不应再出现 QQ 歌手名（面板常驻后隐藏的 QQ 歌单内容仍在 DOM 中，
+    // 因此只检查播放条 bar 本身，不检查整个 container）
+    const barText = container.querySelector('.dsh-music-bar') ? container.querySelector('.dsh-music-bar').textContent : container.textContent
+    expect(barText).not.toContain('周杰伦')
   })
 
   it('does NOT jump back to the QQ tab after choosing a directory while playing QQ', async () => {
@@ -1169,6 +1177,48 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { mineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('我的收藏')
+  })
+
+  it('does NOT fetch QQ data endpoints when not logged in', async () => {
+    // Regression: the QQ panel must treat login as the gate — while logged out,
+    // opening the QQ tab issues only the local /status probe (host reads the
+    // cookie file), never the data endpoints (categories / my-playlists / playlists).
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 未登录：只应请求 /dsh-music/qq/status（本地检测登录态），其余数据接口一律不发
+    expect(container.textContent).toContain('QQ 登录') // 登录界面
+    const dataEndpoints = ['/dsh-music/qq/my-playlists', '/dsh-music/qq/playlist-categories', '/dsh-music/qq/playlists']
+    for (const ep of dataEndpoints) {
+      expect(qqFetchLog).not.toContain(ep)
+    }
+  })
+
+  it('fetches QQ data endpoints automatically once logged in', async () => {
+    // When /status reports logged-in, the data endpoints load automatically
+    // (categories + my-playlists + recommended) without waiting for a tab click.
+    qqLoggedIn = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 登录后：我的歌单/分类/推荐均已自动请求
+    expect(qqFetchLog).toContain('/dsh-music/qq/my-playlists')
+    expect(qqFetchLog).toContain('/dsh-music/qq/playlist-categories')
+    expect(qqFetchLog).toContain('/dsh-music/qq/playlists')
   })
 
   it('auto-advances to the next online QQ track when a track ends', async () => {
@@ -1610,11 +1660,12 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
-  it('does NOT jump back to the QQ playlist layer after switching tabs within a session', async () => {
-    // Regression: QQOnlinePanel unmounts on tab switch; on remount it used to restore
+  it('preserves the QQ playlist layer when switching tabs within a session', async () => {
+    // Regression: QQOnlinePanel used to unmount on tab switch; on remount it restored
     // the persisted 'playlist' layer from localStorage, so switching away and back
-    // (e.g. after picking a directory) yanked the user into the QQ playlist page.
-    // The last-layer restore must only happen ONCE per page session.
+    // yanked the user around. With the panel kept mounted (CSS-hidden), layer is
+    // component state that survives tab switches: entering the playlist layer and
+    // switching away then back must KEEP the user in that layer.
     localStorage.clear()
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
@@ -1632,16 +1683,15 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { enterPl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('playlist')
-    // switch to 本地音乐 tab (QQOnlinePanel unmounts)
+    // switch to 本地音乐 tab (QQOnlinePanel stays mounted, just hidden)
     const musicTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
     act(() => { musicTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // switch back to QQ音乐 tab (remount) -> must NOT be forced back to the playlist layer
+    // switch back to QQ音乐 tab -> the playlist layer must be PRESERVED
     const qqTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
     act(() => { qqTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(false)
-    expect(container.textContent).toContain('推荐歌单') // main UI sub-tab visible
+    expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(true) // still in the playlist layer
   })
 
   it('shows a genuine autoplay-block error exactly once (no duplicate in the settings block)', async () => {
@@ -1693,10 +1743,45 @@ describe('dsh-music-player client render smoke', () => {
     // flush the rejected play() promise -> error state -> re-render
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // the autoplay-block message IS shown (genuine block), exactly once
-    const errors = container.querySelectorAll('.dsh-music-error')
-    expect(errors.length).toBe(1)
-    expect(errors[0].textContent).toContain('浏览器拦截')
-    expect(errors[0].textContent).toContain('自动播放')
+    // the autoplay-block message IS shown (genuine block), exactly once.
+    // Note: with all tabs kept mounted (CSS-hidden), the hidden AI讲书 pane may
+    // render its own unrelated error (e.g. 未配置xiaomi提供方), so count only
+    // the errors whose text is the autoplay-block message.
+    const blockErrors = [...container.querySelectorAll('.dsh-music-error')].filter((el) => el.textContent.includes('浏览器拦截'))
+    expect(blockErrors.length).toBe(1)
+    expect(blockErrors[0].textContent).toContain('自动播放')
+  })
+
+  it('keeps the QQ playlist layer when the panel is closed and reopened', async () => {
+    // Regression: closing the panel used to unmount it (return null), wiping the
+    // QQ panel's component state. With the panel kept mounted (CSS-hidden), the
+    // playlist layer must survive a close + reopen cycle.
+    qqLoggedIn = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // enter the playlist layer
+    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '进入播放列表')
+    expect(enterPl).toBeTruthy()
+    act(() => { enterPl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(true)
+    // close the panel (CSS-hide, not unmount)
+    act(() => { container.querySelector('button[title="关闭"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // reopen -> still in the QQ playlist layer (component state preserved)
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const qqTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { qqTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(true)
   })
 })
