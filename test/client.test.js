@@ -193,7 +193,7 @@ describe('dsh-music-player client render smoke', () => {
   it('renders the now-playing bar without throwing', () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const html = renderToString(bar)
-    expect(html).toContain('本地音乐播放器')
+    expect(html).toContain('DSH音乐播放器')
     // idle state (no track) shows the music note icon
     expect(html).toContain('M12 3v10.55')
   })
@@ -620,7 +620,7 @@ describe('dsh-music-player client render smoke', () => {
     const btns = [...container.querySelectorAll('.dsh-music-qq-login-btn')]
     expect(btns.length).toBe(2)
     expect(container.querySelector('.dsh-music-qq-login-warn')).toBeTruthy()
-    expect(container.textContent).toContain('免责声明')
+    expect(container.textContent).toContain('使用声明')
   })
 
   it('logged-in main UI: toolbar (进入播放列表 / 退出登录) + 4 sub-tabs + search flow', async () => {
