@@ -87,13 +87,13 @@ function boot() {
 beforeEach(() => {
   vi.mocked(QQ.createQRLogin).mockResolvedValue({ key: 'qrsig=abc', imageDataUrl: 'data:image/png;base64,xxx', expiresAt: Date.now() + 60000 })
   vi.mocked(QQ.createWXQRLogin).mockResolvedValue({ key: 'type=wx&uuid=U&state=S', imageDataUrl: 'data:image/jpeg;base64,yyy', expiresAt: Date.now() + 60000 })
-  vi.mocked(QQ.search).mockResolvedValue([{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], album: '叶惠美', payplay: 0, source: 'qq' }])
+  vi.mocked(QQ.search).mockResolvedValue({ results: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], album: '叶惠美', payplay: 0, source: 'qq' }], total: 1, page: 1 })
   vi.mocked(QQ.detectVip).mockResolvedValue(true)
   vi.mocked(QQ.getDownloadURL).mockResolvedValue({ url: 'https://ws.stream.qqmusic.qq.com/up.mp3', filename: 'M500123123.mp3' })
   vi.mocked(QQ.getRecommendedPlaylists).mockResolvedValue([{ id: '111', name: '推荐歌单', creator: '作者', cover: '', trackCount: 10, source: 'qq' }])
   vi.mocked(QQ.getPlaylistCategories).mockResolvedValue([{ id: '1', name: '国语', group: '语种' }, { id: '2', name: '欧美', group: '语种' }])
   vi.mocked(QQ.getCategoryPlaylists).mockResolvedValue([{ id: '222', name: '分类歌单', creator: '作者', cover: '', trackCount: 8, source: 'qq' }])
-  vi.mocked(QQ.searchPlaylist).mockResolvedValue([{ id: '333', name: '搜索歌单', creator: '作者', cover: '', trackCount: 5, source: 'qq' }])
+  vi.mocked(QQ.searchPlaylist).mockResolvedValue({ results: [{ id: '333', name: '搜索歌单', creator: '作者', cover: '', trackCount: 5, source: 'qq' }], total: 1, page: 1 })
   vi.mocked(QQ.getPlaylistSongs).mockResolvedValue({ id: '111', name: '推荐歌单', creator: '作者', trackCount: 1, source: 'qq', songs: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], payplay: 0, source: 'qq' }] })
   vi.mocked(QQ.getMyPlaylists).mockResolvedValue([{ id: '444', name: '我的收藏', creator: '我', cover: '', trackCount: 3, source: 'qq' }])
   vi.mocked(QQ.addQQFav).mockResolvedValue(true)
@@ -193,7 +193,23 @@ describe('dsh-music-player QQ online routes', () => {
       expect(data.ok).toBe(true)
       expect(data.isVip).toBe(false) // no cookie -> refreshQQVip short-circuits to false
       expect(data.results[0].title).toBe('晴天')
-      expect(QQ.search).toHaveBeenCalledWith('晴天', '')
+      expect(data.total).toBe(1)
+      expect(QQ.search).toHaveBeenCalledWith('晴天', '', 1)
+    } finally { cleanup() }
+  })
+
+  it('forwards the page param and returns total for paged song search', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      vi.mocked(QQ.search).mockResolvedValue({ results: [{ id: '456', songmid: '456', title: '夜曲', artists: ['周杰伦'], album: '十一月的萧邦', payplay: 0, source: 'qq' }], total: 42, page: 3 })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/search?w=%E5%91%A8%E6%9D%B0%E4%BC%A6&page=3' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.search).toHaveBeenCalledWith('周杰伦', '', 3)
+      expect(data.results[0].title).toBe('夜曲')
+      expect(data.total).toBe(42)
+      expect(data.page).toBe(3)
     } finally { cleanup() }
   })
 
@@ -308,8 +324,23 @@ describe('dsh-music-player QQ online routes', () => {
       await handler(makeReq({ url: '/dsh-music/qq/playlist-search?w=%E5%91%A8%E6%9D%B0%E4%BC%A6' }), res)
       const data = JSON.parse(res.body)
       expect(data.ok).toBe(true)
-      expect(QQ.searchPlaylist).toHaveBeenCalledWith('周杰伦', '')
+      expect(QQ.searchPlaylist).toHaveBeenCalledWith('周杰伦', '', 1)
       expect(data.playlists[0].name).toBe('搜索歌单')
+    } finally { cleanup() }
+  })
+
+  it('forwards the page param and returns total for paged playlist search', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      vi.mocked(QQ.searchPlaylist).mockResolvedValue({ results: [{ id: '777', name: '周杰伦精选', creator: '作者', cover: '', trackCount: 40, source: 'qq' }], total: 30, page: 2 })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-search?w=%E5%91%A8%E6%9D%B0%E4%BC%A6&page=2' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.searchPlaylist).toHaveBeenCalledWith('周杰伦', '', 2)
+      expect(data.playlists[0].name).toBe('周杰伦精选')
+      expect(data.total).toBe(30)
+      expect(data.page).toBe(2)
     } finally { cleanup() }
   })
 

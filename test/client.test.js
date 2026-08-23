@@ -672,6 +672,60 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('周杰伦合集')
   })
 
+  it('loads more playlist search results via the 加载更多 button (page-2 append)', async () => {
+    qqLoggedIn = true
+    // 歌单搜索：第一页返回满页(20)→出现「加载更多」；第二页返回不同歌单→点击后追加。
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      const url = String(u)
+      if (url.includes('/dsh-music/qq/playlist-search')) {
+        const page = parseInt(new URL(url, 'http://x').searchParams.get('page') || '1', 10)
+        const list = page === 1
+          ? Array.from({ length: 20 }, (_, i) => ({ id: 'pl' + i, name: '歌单' + i, creator: '作者', trackCount: 10, source: 'qq' }))
+          : [{ id: 'pl20', name: '第2页歌单', creator: '作者', trackCount: 10, source: 'qq' }]
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, playlists: list, total: list.length, page }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+      act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const input = container.querySelector('.dsh-music-qq-input')
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, '周杰伦')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const searchBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
+      act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 切到「相关歌单」tab：满页 → 出现「加载更多」按钮
+      const plTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '相关歌单')
+      expect(plTab).toBeTruthy()
+      act(() => { plTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const moreBtn = [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].find((b) => b.textContent === '加载更多')
+      expect(moreBtn).toBeTruthy()
+      act(() => { moreBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 第二页追加进来了
+      expect(container.textContent).toContain('第2页歌单')
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
   it('remembers search keywords and lets you pick one from the dropdown', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
