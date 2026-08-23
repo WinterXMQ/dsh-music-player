@@ -26,6 +26,8 @@ vi.mock('../lib/qq.js', () => ({
   getMyPlaylists: vi.fn(),
   addQQFav: vi.fn(),
   removeQQFav: vi.fn(),
+  addSongToPlaylist: vi.fn(),
+  createPlaylist: vi.fn(),
   getQQFavIds: vi.fn(),
   getTopLists: vi.fn(),
   getTopListSongs: vi.fn(),
@@ -95,9 +97,11 @@ beforeEach(() => {
   vi.mocked(QQ.getCategoryPlaylists).mockResolvedValue([{ id: '222', name: '分类歌单', creator: '作者', cover: '', trackCount: 8, source: 'qq' }])
   vi.mocked(QQ.searchPlaylist).mockResolvedValue({ results: [{ id: '333', name: '搜索歌单', creator: '作者', cover: '', trackCount: 5, source: 'qq' }], total: 1, page: 1 })
   vi.mocked(QQ.getPlaylistSongs).mockResolvedValue({ id: '111', name: '推荐歌单', creator: '作者', trackCount: 1, source: 'qq', songs: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], payplay: 0, source: 'qq' }] })
-  vi.mocked(QQ.getMyPlaylists).mockResolvedValue([{ id: '444', name: '我的收藏', creator: '我', cover: '', trackCount: 3, source: 'qq' }])
+  vi.mocked(QQ.getMyPlaylists).mockResolvedValue([{ id: '444', name: '我的收藏', creator: '我', cover: '', trackCount: 3, source: 'qq', dirId: 444, tid: 444 }])
   vi.mocked(QQ.addQQFav).mockResolvedValue(true)
   vi.mocked(QQ.removeQQFav).mockResolvedValue(true)
+  vi.mocked(QQ.addSongToPlaylist).mockResolvedValue(true)
+  vi.mocked(QQ.createPlaylist).mockResolvedValue({ id: 555, name: '新歌单' })
   vi.mocked(QQ.getQQFavIds).mockResolvedValue({ ids: [123, 456], mids: ['a', 'b'] })
   vi.mocked(QQ.getTopLists).mockResolvedValue([{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 123 }] }])
   vi.mocked(QQ.getTopListSongs).mockResolvedValue({ id: '62', name: '飙升榜', songs: [{ id: 'm1', songmid: 'm1', title: '飙升歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
@@ -314,6 +318,41 @@ describe('dsh-music-player QQ online routes', () => {
       expect(data.ok).toBe(true)
       expect(QQ.getQQFavIds).toHaveBeenCalled()
       expect(data.ids).toEqual([123, 456])
+    } finally { cleanup() }
+  })
+
+  it('adds a song to a user playlist via /dsh-music/qq/playlist-add', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const body = JSON.stringify({ song: { songid: 123, songtype: 0 }, dirId: 444, tid: 444 })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-add', method: 'POST', headers: { 'content-type': 'application/json' }, body }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.addSongToPlaylist).toHaveBeenCalledWith({ songid: 123, songtype: 0 }, 444, 444, '')
+    } finally { cleanup() }
+  })
+
+  it('creates a playlist via /dsh-music/qq/playlist-create', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const body = JSON.stringify({ name: '新歌单' })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-create', method: 'POST', headers: { 'content-type': 'application/json' }, body }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.playlist.name).toBe('新歌单')
+      expect(QQ.createPlaylist).toHaveBeenCalledWith('新歌单', '')
+    } finally { cleanup() }
+  })
+
+  it('rejects an empty playlist name via /dsh-music/qq/playlist-create', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-create', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '  ' }) }), res)
+      expect(res.status).toBe(400)
+      expect(JSON.parse(res.body).ok).toBe(false)
     } finally { cleanup() }
   })
 

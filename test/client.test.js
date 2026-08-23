@@ -90,7 +90,7 @@ async function fetchStub(url, opts) {
     return jsonRes({ ok: true, isVip: false, results: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], album: '叶惠美', payplay: 0, source: 'qq' }] })
   }
   if (u === '/dsh-music/qq/my-playlists') {
-    return jsonRes({ ok: true, playlists: [{ id: 'mine1', name: '我的收藏', creator: '我', trackCount: 2, source: 'qq' }] })
+    return jsonRes({ ok: true, playlists: [{ id: 'mine1', name: '我的收藏', creator: '我', trackCount: 2, source: 'qq', dirId: 987, tid: 987 }] })
   }
   if (u === '/dsh-music/qq/playlist-categories') {
     return jsonRes({ ok: true, categories: [{ id: '1', name: '国语', group: '语种' }, { id: '2', name: '欧美', group: '语种' }] })
@@ -872,6 +872,61 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { moreBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(container.textContent).toContain('分类更多2')
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
+  it('adds a QQ song to a my-playlist via the per-row + button popup', async () => {
+    qqLoggedIn = true
+    const origFetch = window.fetch
+    const favCalls = []
+    window.fetch = (u, o) => {
+      const url = String(u)
+      if (url === '/dsh-music/qq/playlist-add' && o && o.method === 'POST') {
+        try { favCalls.push(JSON.parse(o.body || '{}')) } catch {}
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+      act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const input = container.querySelector('.dsh-music-qq-input')
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, '晴天')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const searchBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
+      act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 歌曲行尾部有「＋」按钮
+      const songRow = [...container.querySelectorAll('.dsh-music-track-row')].find((r) => r.textContent.includes('晴天'))
+      const plusBtn = songRow && songRow.querySelector('.dsh-music-playlist-mini.add')
+      expect(plusBtn).toBeTruthy()
+      act(() => { plusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 弹出「我的歌单」列表（弹窗 portal 到 body）
+      const popItem = [...document.body.querySelectorAll('.dsh-music-add-pop-item')].find((b) => b.textContent.includes('我的收藏'))
+      expect(popItem).toBeTruthy()
+      act(() => { popItem.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 触发加入请求
+      expect(favCalls.length).toBe(1)
+      expect(favCalls[0].song.songmid).toBe('123')
+      expect(favCalls[0].dirId).toBeTruthy()
     } finally {
       window.fetch = origFetch
     }
