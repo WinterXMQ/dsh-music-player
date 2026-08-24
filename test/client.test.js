@@ -62,6 +62,12 @@ let lastFilesUrl = null
 // test hook: sections served for /dsh-music/book/*/meta (set before bootClient so
 // the refresh-restore path — which fetches meta during load — sees them too)
 let bookMetaSections = []
+// test hook: per-book sections keyed by book id, so different books can report
+// different structures (e.g. one with chapters, one without) in the same test.
+let bookMetaById = {}
+// test hook: /dsh-music/book/*/text?from= response chunk text (for the AI 讲书
+// subtitle-line splitting test).
+let bookTextFixture = ''
 // test hook: whether /dsh-music/qq/status reports logged-in (set before rendering).
 let qqLoggedIn = false
 // test hook: records /dsh-music/qq/fav POST bodies (action/song) for assertion.
@@ -152,7 +158,13 @@ async function fetchStub(url, opts) {
     return jsonRes({ ok: true, playlists: [{ id: 'cat1', name: '国语歌单', creator: '作者', trackCount: 30, source: 'qq' }] })
   }
   if (u.includes('/dsh-music/book/') && u.endsWith('/meta')) {
-    return jsonRes({ id: 'b1', name: '测试小说', total: 25, title: '测试小说', author: '佚名', sections: bookMetaSections })
+    const id = u.split('/')[3] || 'b1'
+    const sections = bookMetaById[id] !== undefined ? bookMetaById[id] : bookMetaSections
+    return jsonRes({ id, name: '测试小说', total: 25, title: '测试小说', author: '佚名', sections })
+  }
+  if (u.includes('/dsh-music/book/') && u.includes('/text?from=')) {
+    const from = parseInt(new URL('http://x' + u).searchParams.get('from') || '0', 10) || 0
+    return jsonRes({ ok: true, from, text: bookTextFixture })
   }
   if (u.startsWith('/dsh-music/files')) {
     lastFilesUrl = u
@@ -220,6 +232,7 @@ beforeEach(async () => {
   localStorage.clear()
   lastFilesUrl = null
   bookMetaSections = []
+  bookMetaById = {}
   qqLoggedIn = false
   favCalls = []
   delPlaylistCalls = []
@@ -874,6 +887,281 @@ describe('dsh-music-player client render smoke', () => {
     const active = container.querySelector('.dsh-music-toc-item.active')
     expect(active).toBeTruthy()
     expect(active.textContent).toContain('第三章 转')
+  })
+
+  it('does NOT append a chapter name or the “-” separator when the novel has no chapters', async () => {
+    // A novel with no detectable section structure must show ONLY the book title
+    // in the bar — no " - " and no chapter text appended (currentSection stays '').
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '无章节小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = [] // no structure -> parser returns empty sections
+    localStorage.setItem('dsh-music-books-playback', JSON.stringify({
+      '无章节小说.txt': { from: 3, base: 100, pos: 1, total: 25, ts: 999999999 },
+    }))
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-time async /meta fetch so currentSection would arrive only if sections exist
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    // title only: extension stripped, NO chapter appended, NO "- " separator
+    expect(nameSpan.textContent).toContain('无章节小说')
+    expect(nameSpan.textContent).not.toContain('无章节小说.txt')
+    expect(nameSpan.textContent).not.toContain('-')
+    expect(nameSpan.querySelector('.dsh-music-bar-artist')).toBeNull()
+  })
+
+  it('clears a stale chapter name when switching to a novel that has no chapters', async () => {
+    // Regression: play a book WITH chapters (sets currentSection), then switch to
+    // a book WITHOUT chapters. The bar must NOT show the previous book's chapter
+    // (and no " - " separator) — currentSection must be reset on book switch.
+    const sections = [
+      { type: 'chapter', heading: '第一章 起', fromChunk: 0 },
+      { type: 'chapter', heading: '第二章 承', fromChunk: 5 },
+    ]
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [
+      { id: 'b1', name: '有章节小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' },
+      { id: 'b2', name: '无章节小说.txt', url: '/dsh-music/book/b2', size: 100, ext: 'txt' },
+    ] }
+    bookMetaById = { b1: sections, b2: [] }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    expect(bookTab).toBeTruthy()
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // play the chaptered book first
+    const chBook = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('有章节小说'))
+    expect(chBook).toBeTruthy()
+    act(() => { chBook.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    let nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan.textContent).toContain('有章节小说')
+    expect(nameSpan.textContent).toContain('第一章 起')
+    expect(nameSpan.textContent).toContain('-')
+    // now switch to the chapter-less book
+    const plainBook = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('无章节小说'))
+    expect(plainBook).toBeTruthy()
+    act(() => { plainBook.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan.textContent).toContain('无章节小说')
+    expect(nameSpan.textContent).not.toContain('.txt')      // extension stripped
+    expect(nameSpan.textContent).not.toContain('第一章 起') // no stale chapter
+    expect(nameSpan.textContent).not.toContain('-')         // no separator
+    expect(nameSpan.querySelector('.dsh-music-bar-artist')).toBeNull()
+  })
+
+  it('keeps a quoted dialogue on a single AI 讲书 subtitle line (no split on 。? inside “”)', async () => {
+    // The subtitle line for a book chunk is cut by splitSentences, which must
+    // treat “...” as atomic — a 。/？ inside the quotes must NOT split the line.
+    const audios = []
+    class SubAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '对话测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他说：“你来了吗？我等你很久了。”她点点头。'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', SubAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('对话测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // flush the /text fetch that fills subtitleLines
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // real chunk duration + position so updateLyric selects line 0
+      audio.duration = 10
+      audio.currentTime = 0
+      act(() => { audio.emit('timeupdate') })
+      // idle (non-hovered) bar shows the subtitle line
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      // the whole dialogue is one line: the 。？ inside “...” didn't cut it
+      expect(lyric.textContent).toContain('他说：“你来了吗？我等你很久了。”她点点头。')
+      expect(lyric.textContent).not.toContain('你来了吗？”\n')
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
+  it('wraps long AI 讲书 subtitle lines adaptively, each no longer than 30 chars', async () => {
+    // A single long sentence (>30) full of commas: splitSentences must wrap it
+    // into ≤30-char lines at the natural clause pauses, and never split a
+    // quoted dialogue in the process.
+    const audios = []
+    class WrapAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长句测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他说：“我们先商量一下，然后再做决定，千万不要冲动。”接着，他转身走了出去，留下我一个人在原地发呆，心里想着他刚才说的那一番话。'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', WrapAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('长句测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      const seen = new Set()
+      // sample progress across the whole chunk so every subtitle line surfaces
+      for (let t = 0; t <= 9.9; t += 0.05) {
+        audio.currentTime = t
+        act(() => { audio.emit('timeupdate') })
+        const el = container.querySelector('.dsh-music-bar-lyric')
+        if (el && el.textContent) seen.add(el.textContent)
+      }
+      // the long sentence wrapped into multiple lines, and each line ≤ 48
+      expect(seen.size).toBeGreaterThan(1)
+      for (const line of seen) expect(line.length).toBeLessThanOrEqual(30)
+      // the quoted dialogue stays on a single line (never split inside “”)
+      const holder = [...seen].find((l) => l.includes('“我们先商量一下'))
+      expect(holder).toBeTruthy()
+      expect(holder).toContain('千万不要冲动。”')
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
+  it('weights AI 讲书 subtitle timing by line length so a long line is not swapped out early', async () => {
+    // Two lines: a long first sentence and a 2-char second. TTS duration ∝ chars,
+    // so the long line should fill most of the chunk. At p=0.6 the uniform "1/N"
+    // mapping would jump to the short line, but the char-weighted mapping must
+    // still show the long line.
+    const audios = []
+    class WeightAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '加权测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '这一段是第一个句子内容，它比较长。短。'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', WeightAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('加权测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // p = 6/10 = 0.6 — uniform "floor(0.6 * 2) = 1" → the short line; weighted keeps the long one.
+      audio.duration = 10
+      audio.currentTime = 6
+      act(() => { audio.emit('timeupdate') })
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      // the long line still shows, NOT the 2-char short line
+      expect(lyric.textContent).toContain('第一个句子内容')
+      expect(lyric.textContent).not.toContain('短')
+      // and the early part of the chunk keeps the same long line
+      audio.currentTime = 1
+      act(() => { audio.emit('timeupdate') })
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toContain('第一个句子内容')
+    } finally {
+      bookTextFixture = ''
+    }
   })
 
   it('double-clicking a track plays it without pausing or showing an autoplay-block error', async () => {

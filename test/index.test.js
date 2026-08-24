@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileS
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { apply, parseBookStructure, splitBookChunks, parseLrc } from '../lib/index.js'
+import { apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' }) {
@@ -756,7 +756,7 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     // MAX_TTS_CHARS + a heading line, never the whole remaining text
     expect(fromChunkOfBreak.length).toBe(2)
     expect(fromChunkOfBreak[1]).toBeGreaterThan(fromChunkOfBreak[0])
-    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(150)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
   })
 
   it('falls back gracefully when the heading cannot be matched in the source (e.g. WPS codes)', () => {
@@ -775,6 +775,58 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     const { chunks } = splitBookChunks(n, [])
     expect(chunks.length).toBe(1)
     expect(chunks[0]).toContain('没有章节标题')
+  })
+
+  it('keeps a quoted dialogue intact even when it contains 。？ inside', () => {
+    // A 。！？…； inside “...” must NOT cut the sentence: the whole dialogue stays in
+    // one chunk (and reads as a single utterance), so it is never split mid-quote.
+    const n = norm('他说：“你来了吗？我等你很久了。”她点点头。')
+    const { chunks } = splitBookChunks(n, [])
+    // content preserved & exactly one chunk (short sentence + both quotes)
+    expect(chunks.join('')).toBe(n)
+    expect(chunks.length).toBe(1)
+    // the ? inside the quote did not open a chunk boundary inside the quote
+    const holder = chunks[0]
+    expect(holder).toContain('你来了吗？我等你很久了。”')
+    expect(holder.includes('“你来了吗')).toBe(true)
+  })
+
+  it('never produces a chunk longer than MAX_TTS_CHARS', () => {
+    // a long run of normal sentences well over the cap
+    const n = norm(('这是第一句话，里面有一个逗号分句。'.repeat(40)))
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+  })
+
+  it('splits an over-long sentence at a clause pause (adaptive), not a raw hard cut', () => {
+    // one giant sentence (no 。 inside) longer than the cap, dense with commas
+    const clauses = Array.from({ length: 40 }, (_, i) => '这是第' + (i + 1) + '个分句：').join('')
+    const n = norm(clauses + '至此完毕。')
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.length).toBeGreaterThan(1)
+    // content preserved (nothing truncated)
+    expect(chunks.join('')).toBe(n)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    // every chunk boundary lands on a clause pause, never mid-word
+    for (let i = 0; i < chunks.length - 1; i++) expect(chunks[i].endsWith('：')).toBe(true)
+  })
+
+  it('does not cut inside a quoted dialogue even when a chunk boundary is forced', () => {
+    // Place a small dialogue in the middle of a comma-laden run that overflows
+    // the cap. The adaptive splitter must keep “...” together — the boundary ends
+    // up outside the quotes, never inside them.
+    const filler = '一二三四五六七八九十，'
+    const dialogue = '“他说完就走了。”'
+    const n = norm(filler.repeat(9) + dialogue + filler.repeat(9))
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.join('')).toBe(n)
+    // the chunk holding the opening quote carries the whole dialogue intact
+    const holder = chunks.find((c) => c.includes('“'))
+    expect(holder).toBeTruthy()
+    expect(holder).toContain('他说完就走了。”')
+    // each chunk stays within the cap
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
   })
 })
 
