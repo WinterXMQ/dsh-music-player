@@ -28,6 +28,7 @@ vi.mock('../lib/qq.js', () => ({
   removeQQFav: vi.fn(),
   addSongToPlaylist: vi.fn(),
   createPlaylist: vi.fn(),
+  deleteSongFromPlaylist: vi.fn(),
   getQQFavIds: vi.fn(),
   getTopLists: vi.fn(),
   getTopListSongs: vi.fn(),
@@ -101,6 +102,7 @@ beforeEach(() => {
   vi.mocked(QQ.addQQFav).mockResolvedValue(true)
   vi.mocked(QQ.removeQQFav).mockResolvedValue(true)
   vi.mocked(QQ.addSongToPlaylist).mockResolvedValue(true)
+  vi.mocked(QQ.deleteSongFromPlaylist).mockResolvedValue(true)
   vi.mocked(QQ.createPlaylist).mockResolvedValue({ id: 555, name: '新歌单' })
   vi.mocked(QQ.getQQFavIds).mockResolvedValue({ ids: [123, 456], mids: ['a', 'b'] })
   vi.mocked(QQ.getTopLists).mockResolvedValue([{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 123 }] }])
@@ -330,6 +332,18 @@ describe('dsh-music-player QQ online routes', () => {
       const data = JSON.parse(res.body)
       expect(data.ok).toBe(true)
       expect(QQ.addSongToPlaylist).toHaveBeenCalledWith({ songid: 123, songtype: 0 }, 444, 444, '')
+    } finally { cleanup() }
+  })
+
+  it('removes a song from a user playlist via /dsh-music/qq/playlist-remove', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const body = JSON.stringify({ song: { songid: 123, songtype: 0 }, dirId: 444, tid: 0 })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-remove', method: 'POST', headers: { 'content-type': 'application/json' }, body }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.deleteSongFromPlaylist).toHaveBeenCalledWith({ songid: 123, songtype: 0 }, 444, 0, '')
     } finally { cleanup() }
   })
 
