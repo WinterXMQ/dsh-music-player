@@ -658,7 +658,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('使用声明')
   })
 
-  it('logged-in main UI: toolbar (进入播放列表 / 退出登录) + 4 sub-tabs + search flow', async () => {
+  it('logged-in main UI: toolbar (播放列表 / 退出登录) + 4 sub-tabs + search flow', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -670,10 +670,10 @@ describe('dsh-music-player client render smoke', () => {
     const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
     act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // toolbar: 进入播放列表 (left) and 退出登录 (right), same ghost style
-    expect(container.textContent).toContain('进入播放列表')
+    // toolbar: 播放列表 (left) and 退出登录 (right), same ghost style
+    expect(container.textContent).toContain('播放列表')
     expect(container.textContent).toContain('退出登录')
-    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '进入播放列表')
+    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
     const logoutBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '退出登录')
     expect(enterPl && enterPl.className.includes('ghost')).toBe(true)
     expect(logoutBtn && logoutBtn.className.includes('ghost')).toBe(true)
@@ -1053,7 +1053,7 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
-  it('enters the playlist layer via 进入播放列表, shows a back button, and persists the layer', async () => {
+  it('enters the playlist layer via 播放列表, shows a back button, and persists the layer', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -1065,8 +1065,8 @@ describe('dsh-music-player client render smoke', () => {
     const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
     act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // 进入播放列表（无在线播放，显示空提示）→ 第 2 层
-    const plBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '进入播放列表')
+    // 播放列表（无在线播放，显示空提示）→ 第 2 层
+    const plBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
     expect(plBtn).toBeTruthy()
     act(() => { plBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -1083,7 +1083,7 @@ describe('dsh-music-player client render smoke', () => {
 
   it('QQ 播放列表进入时定位到正在播放的曲目（scrollIntoView 命中 active 行）', async () => {
     qqLoggedIn = true
-    // jsdom 无 scrollIntoView：spy 它，验证进入播放列表层时会把正在播放的 active 行滚到可见。
+    // jsdom 无 scrollIntoView：spy 它，验证播放列表层时会把正在播放的 active 行滚到可见。
     const scrollSpy = vi.fn()
     Element.prototype.scrollIntoView = scrollSpy
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
@@ -1112,7 +1112,7 @@ describe('dsh-music-player client render smoke', () => {
     const activeRows = [...container.querySelectorAll('.dsh-music-track-row.active')]
     expect(activeRows.length).toBe(1)
     expect(activeRows[0].textContent).toContain('七里香')
-    // scrollIntoView 必须被调用在 active 行上（证明进入播放列表层时定位到正在播放位置）
+    // scrollIntoView 必须被调用在 active 行上（证明播放列表层时定位到正在播放位置）
     const targets = scrollSpy.mock.instances.filter((el) =>
       el && el.classList && el.classList.contains('dsh-music-track-row') && el.classList.contains('active'))
     expect(targets.length).toBeGreaterThan(0)
@@ -2023,7 +2023,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // enter the playlist layer once -> persisted as 'playlist'
-    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '进入播放列表')
+    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
     act(() => { enterPl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('playlist')
@@ -2112,7 +2112,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // enter the playlist layer
-    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '进入播放列表')
+    const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
     expect(enterPl).toBeTruthy()
     act(() => { enterPl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
