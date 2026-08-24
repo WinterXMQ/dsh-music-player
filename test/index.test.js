@@ -14,7 +14,7 @@ import { join, resolve } from 'node:path'
 
 import {
   apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS,
-  zipEntries, zipReadEntry, htmlToText, decodeEntities, readEpubBuffer,
+  zipEntries, zipReadEntry, htmlToText, decodeEntities, readEpubBuffer, qqQualityLabel,
 } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
@@ -1219,6 +1219,28 @@ describe('dsh-music-player EPUB reader', () => {
   it('decodeEntities handles numeric and named entities', () => {
     expect(decodeEntities('a&amp;b&#x4E8C;&#20108;&ldquo;x&rdquo;')).toBe('a&b二二“x”')
     expect(decodeEntities('&#x1F600;')).toBe('\u{1F600}')
+  })
+})
+
+describe('dsh-music-player QQ quality label (qqQualityLabel)', () => {
+  it('maps取链 filename 前缀/扩展名到通俗音质标签', () => {
+    // 四档 FLAC（AI00/Q001/Q000/F000）→ 无损
+    expect(qqQualityLabel('AI00abcdefabcdef.flac')).toBe('无损')
+    expect(qqQualityLabel('Q001abcdefabcdef.flac')).toBe('无损')
+    expect(qqQualityLabel('Q000abcdefabcdef.flac')).toBe('无损')
+    expect(qqQualityLabel('F000abcdefabcdef.flac')).toBe('无损')
+    // OGG（O801）与 320k MP3（M800）→ 高音质
+    expect(qqQualityLabel('O801abcdefabcdef.ogg')).toBe('高音质')
+    expect(qqQualityLabel('M800abcdefabcdef.mp3')).toBe('高音质')
+    // 128k MP3（M500）→ 标准
+    expect(qqQualityLabel('M500abcdefabcdef.mp3')).toBe('标准')
+  })
+
+  it('returns an empty label for unknown / empty filenames', () => {
+    expect(qqQualityLabel('')).toBe('')
+    expect(qqQualityLabel(null)).toBe('')
+    expect(qqQualityLabel(undefined)).toBe('')
+    expect(qqQualityLabel('XYZabcdefabcdef.weird')).toBe('')
   })
 })
 

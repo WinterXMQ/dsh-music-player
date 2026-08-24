@@ -250,6 +250,93 @@ describe('dsh-music-player QQ online routes', () => {
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/qq/play/99' }), res)
       expect(res.status).toBe(404)
+      // 取链失败：不带「真实品质」头
+      expect(res.headers['X-DSH-QQ-Quality']).toBeUndefined()
+    } finally { cleanup() }
+  })
+
+  it('sends the X-DSH-QQ-Quality header (无损) from the取链 filename', async () => {
+    const { handler, cleanup } = boot()
+    vi.mocked(QQ.getDownloadURL).mockResolvedValue({ url: 'https://ws.stream.qqmusic.qq.com/x.flac', filename: 'F000123123.flac' })
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      headers: { get: (h) => h === 'content-type' ? 'audio/flac' : (h === 'content-length' ? '5' : null) },
+      body: (async function* () { yield Buffer.from('DATA') })(),
+    })))
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/play/123' }), res)
+      expect(res.status).toBe(200)
+      // 真实 Node 拒绝非 ASCII 响应头值：值必须 percent-encoded（纯 ASCII），解码后为中文标签
+      expect(res.headers['X-DSH-QQ-Quality']).toBe(encodeURIComponent('无损'))
+      expect(decodeURIComponent(res.headers['X-DSH-QQ-Quality'])).toBe('无损')
+    } finally { cleanup() }
+  })
+
+  it('maps M800→高音质 and M500→标准 in the quality header', async () => {
+    const cases = [
+      { filename: 'M800123123.mp3', expect: '高音质' },
+      { filename: 'O801123123.ogg', expect: '高音质' },
+      { filename: 'M500123123.mp3', expect: '标准' },
+    ]
+    for (const c of cases) {
+      const { handler, cleanup } = boot()
+      vi.mocked(QQ.getDownloadURL).mockResolvedValue({ url: 'https://ws.stream.qqmusic.qq.com/x', filename: c.filename })
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        status: 200,
+        headers: { get: (h) => h === 'content-type' ? 'audio/mpeg' : (h === 'content-length' ? '5' : null) },
+        body: (async function* () { yield Buffer.from('DATA') })(),
+      })))
+      try {
+        const res = makeRes()
+        await handler(makeReq({ url: '/dsh-music/qq/play/123' }), res)
+        expect(res.status).toBe(200)
+        expect(decodeURIComponent(res.headers['X-DSH-QQ-Quality'])).toBe(c.expect)
+      } finally { cleanup() }
+    }
+  })
+
+  it('caches the取链 result per songmid so repeat requests get the same quality', async () => {
+    const { handler, cleanup } = boot()
+    const take = vi.fn(async () => ({ url: 'https://ws.stream.qqmusic.qq.com/x.flac', filename: 'Q000123123.flac' }))
+    vi.mocked(QQ.getDownloadURL).mockImplementation(take)
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      headers: { get: (h) => h === 'content-type' ? 'audio/flac' : (h === 'content-length' ? '5' : null) },
+      body: (async function* () { yield Buffer.from('DATA') })(),
+    })))
+    try {
+      const r1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/play/123' }), r1)
+      expect(decodeURIComponent(r1.headers['X-DSH-QQ-Quality'])).toBe('无损')
+      const r2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/play/123' }), r2)
+      expect(decodeURIComponent(r2.headers['X-DSH-QQ-Quality'])).toBe('无损')
+      // 第二次命中缓存：不再发起取链（真实品质与真正播放的流一致）
+      expect(take).toHaveBeenCalledTimes(1)
+    } finally { cleanup() }
+  })
+
+  it('always requests the full (无损-first)取链 order, not gated on detectVip', async () => {
+    // Regression: detectVip 用免费档探测会把 VIP 账号误判为非 VIP，导致取链只走
+    // M800/M500（高音质/标准）而拿不到无损。取链必须始终按完整档位顺序请求，
+    // 由服务端授予哪个播哪个（真实品质）。
+    const { handler, cleanup } = boot()
+    const take = vi.fn(async () => ({ url: 'https://ws.stream.qqmusic.qq.com/x.flac', filename: 'AI00123123.flac' }))
+    vi.mocked(QQ.getDownloadURL).mockImplementation(take)
+    vi.mocked(QQ.detectVip).mockResolvedValue(false) // 即使 detectVip 误判非 VIP…
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      headers: { get: (h) => h === 'content-type' ? 'audio/flac' : (h === 'content-length' ? '5' : null) },
+      body: (async function* () { yield Buffer.from('DATA') })(),
+    })))
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/play/123' }), res)
+      expect(res.status).toBe(200)
+      // …取链仍以完整档位顺序（isVip=true）请求，服务端授予无损就显示无损
+      expect(take.mock.calls[0][2]).toBe(true)
+      expect(decodeURIComponent(res.headers['X-DSH-QQ-Quality'])).toBe('无损')
     } finally { cleanup() }
   })
 

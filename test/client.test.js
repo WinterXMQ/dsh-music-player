@@ -1952,6 +1952,100 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('周杰伦')
   })
 
+  it('shows the QQ quality tier inside the QQ音乐 badge when the play stream reports it', async () => {
+    // 真实品质：Host 随 /qq/play 响应回传 X-DSH-QQ-Quality 头（percent-encoded），
+    // 客户端用轻量 HEAD 立即读取，拼进播放条徽标（「QQ音乐 · 无损」）；没取到则只显示「QQ音乐」。
+    qqLoggedIn = true
+    const headStub = async (url, opts) => {
+      const u = String(url)
+      const o = opts || {}
+      if (u.startsWith('/dsh-music/qq/play/') && o.method === 'HEAD') {
+        return Promise.resolve({ ok: true, status: 200, headers: { get: (n) => n === 'X-DSH-QQ-Quality' ? encodeURIComponent('无损') : null } })
+      }
+      return fetchStub(url, opts)
+    }
+    vi.stubGlobal('fetch', headStub)
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 徽标带品质标签：QQ音乐 · 无损
+      expect(container.textContent).toContain('QQ音乐 · 无损')
+      // 本地/讲书等其他来源不受影响，不会出现品质标签
+      expect(container.textContent).not.toContain('QQ音乐 · 高音质')
+    } finally {
+      vi.unstubAllGlobals()
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('re-fetches the quality via HEAD when clicking 下一首 (startPlay path)', async () => {
+    // Regression: 切歌/自动续播走 step → startPlay（通用路径，不走 startQQPlayback），
+    // 必须在 startPlay 里也触发 HEAD，否则下一首的品质标签不会出现。
+    qqLoggedIn = true
+    const headLog = []
+    const headStub = async (url, opts) => {
+      const u = String(url)
+      const o = opts || {}
+      if (u.startsWith('/dsh-music/qq/play/') && o.method === 'HEAD') {
+        headLog.push(u)
+        return Promise.resolve({ ok: true, status: 200, headers: { get: (n) => n === 'X-DSH-QQ-Quality' ? encodeURIComponent('无损') : null } })
+      }
+      return fetchStub(url, opts)
+    }
+    vi.stubGlobal('fetch', headStub)
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('QQ音乐 · 无损')
+      // 点「下一首」→ step → startPlay → 应为下一首(790) 再发一次 HEAD
+      const nextBtn = container.querySelector('button[title="下一首"]')
+      act(() => { nextBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(headLog).toContain('/dsh-music/qq/play/790')
+      // 下一首的品质标签也应显示
+      expect(container.textContent).toContain('QQ音乐 · 无损')
+    } finally {
+      vi.unstubAllGlobals()
+      document.body.innerHTML = ''
+    }
+  })
+
   it('shows the QQ online lyric in the bar (idle state) with translation merged', async () => {
     // P2：在线 QQ 歌词。QQ 播放走 startQQPlayback（不走 startPlay），歌词从
     // /dsh-music/qq/lyric 按 songmid 取；有逐句翻译时合并为「原文 ／ 翻译」。
