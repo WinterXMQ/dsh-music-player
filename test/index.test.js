@@ -8,10 +8,14 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { deflateRawSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS } from '../lib/index.js'
+import {
+  apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS,
+  zipEntries, zipReadEntry, htmlToText, decodeEntities, readEpubBuffer,
+} from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' }) {
@@ -64,6 +68,139 @@ function makeFs(rootDir) {
     async readBytes(target, _offset, _size) { return readFileSync(target) },
   }
 }
+
+// ---- minimal ZIP writer (stored or deflate) + EPUB fixture builder ----
+// Used to construct real EPUB byte buffers on the fly so the host's epub reader
+// (and the /book routes against a real .epub file) can be tested end-to-end.
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let n = 0; n < 256; n++) {
+    let c = n
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1
+    t[n] = c >>> 0
+  }
+  return t
+})()
+function crc32(buf) {
+  let c = 0xFFFFFFFF
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8)
+  return (c ^ 0xFFFFFFFF) >>> 0
+}
+function buildZip(entries, compress = false) {
+  const chunks = []
+  const central = []
+  let offset = 0
+  for (const e of entries) {
+    const name = Buffer.from(e.name, 'utf8')
+    let data = e.data
+    let method = 0
+    if (compress) { data = deflateRawSync(data); method = 8 }
+    const crc = crc32(e.data)
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0) // sig
+    local.writeUInt16LE(20, 4) // version needed
+    local.writeUInt16LE(0, 6) // flags
+    local.writeUInt16LE(method, 8)
+    local.writeUInt16LE(0, 10) // mod time
+    local.writeUInt16LE(0, 12) // mod date
+    local.writeUInt32LE(crc, 14)
+    local.writeUInt32LE(data.length, 18) // compressed size
+    local.writeUInt32LE(e.data.length, 22) // uncompressed size
+    local.writeUInt16LE(name.length, 26)
+    local.writeUInt16LE(0, 28) // extra len
+    chunks.push(local, name, data)
+    const cd = Buffer.alloc(46)
+    cd.writeUInt32LE(0x02014b50, 0) // sig
+    cd.writeUInt16LE(20, 4) // version made by
+    cd.writeUInt16LE(20, 6) // version needed
+    cd.writeUInt16LE(0, 8) // flags
+    cd.writeUInt16LE(method, 10)
+    cd.writeUInt16LE(0, 12) // mod time
+    cd.writeUInt16LE(0, 14) // mod date
+    cd.writeUInt32LE(crc, 16)
+    cd.writeUInt32LE(data.length, 20)
+    cd.writeUInt32LE(e.data.length, 24)
+    cd.writeUInt16LE(name.length, 28)
+    cd.writeUInt16LE(0, 30) // extra len
+    cd.writeUInt16LE(0, 32) // comment len
+    cd.writeUInt16LE(0, 34) // disk number
+    cd.writeUInt16LE(0, 36) // internal attrs
+    cd.writeUInt32LE(0, 38) // external attrs
+    cd.writeUInt32LE(offset, 42) // local header offset
+    central.push(cd, name)
+    offset += 30 + name.length + data.length
+  }
+  const cdBuf = Buffer.concat(central)
+  const cdOffset = offset
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0) // sig
+  eocd.writeUInt16LE(0, 4)
+  eocd.writeUInt16LE(0, 6)
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(cdBuf.length, 12)
+  eocd.writeUInt32LE(cdOffset, 16)
+  eocd.writeUInt16LE(0, 20)
+  return Buffer.concat([Buffer.concat(chunks), cdBuf, eocd])
+}
+
+// Build a minimal-but-standard EPUB buffer. `chapters` is an array of XHTML
+// body strings (or { body, media } objects). Options: `compress` (deflate the
+// zip), `spineLinear` ({ ch0: 'no' } marks an itemref linear="no"),
+// `encryptedPaths` (paths listed in META-INF/encryption.xml, e.g. DRM), and
+// `nsPrefix` (e.g. 'opf' → <opf:item>/<opf:itemref> namespace-prefixed tags,
+// as some real-world EPUB2 files are written).
+function buildEpub({ title = '测试之书', author = '测试作者', chapters = [], compress = false, spineLinear = {}, encryptedPaths = [], nsPrefix = '' } = {}) {
+  const files = []
+  files.push({ name: 'mimetype', data: Buffer.from('application/epub+zip', 'utf8') })
+  files.push({
+    name: 'META-INF/container.xml',
+    data: Buffer.from(`<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`, 'utf8'),
+  })
+  const P = nsPrefix === '' ? '' : nsPrefix + ':'
+  const items = []
+  const spine = []
+  chapters.forEach((ch, i) => {
+    const c = typeof ch === 'string' ? { body: ch } : ch
+    const id = 'ch' + i
+    const href = 'ch' + i + '.xhtml'
+    const media = c.media || 'application/xhtml+xml'
+    items.push(`<${P}item id="${id}" href="${href}" media-type="${media}"/>`)
+    const linear = spineLinear[id] === 'no' ? ' linear="no"' : ''
+    spine.push(`<${P}itemref idref="${id}"${linear}/>`)
+    files.push({ name: 'OEBPS/' + href, data: Buffer.from(c.body, 'utf8') })
+  })
+  const opf = `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:test</dc:identifier>
+    <dc:title>${title}</dc:title>
+    <dc:creator>${author}</dc:creator>
+    <dc:language>zh</dc:language>
+  </metadata>
+  <manifest>${items.join('\n    ')}</manifest>
+  <spine>${spine.join('\n    ')}</spine>
+</package>`
+  files.push({ name: 'OEBPS/content.opf', data: Buffer.from(opf, 'utf8') })
+  if (encryptedPaths.length > 0) {
+    files.push({
+      name: 'META-INF/encryption.xml',
+      data: Buffer.from(`<?xml version="1.0"?>
+<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+${encryptedPaths.map((p) => `<enc:EncryptedData><enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/><enc:CipherData><enc:CipherReference URI="${p}"/></enc:CipherData></enc:EncryptedData>`).join('\n')}
+</encryption>`, 'utf8'),
+    })
+  }
+  return buildZip(files, compress)
+}
+
+// A realistic chapter XHTML used by most epub fixtures below.
+const epubChapter = (heading, body, extraHead = '') => `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>${heading}</title><style>p { color: red }</style></head>
+<body>${extraHead}<h1>${heading}</h1><p>${body}</p></body></html>`
 
 // ---- build a ctx + boot a plugin instance against a temp "home" ----
 function boot({ files = {}, musicFiles = {} } = {}) {
@@ -967,6 +1104,193 @@ describe('dsh-music-player book structure meta route', () => {
         expect(sec.heading.length).toBeGreaterThan(0)
         prev = sec.fromChunk
       }
+    } finally { cleanup() }
+  })
+})
+
+describe('dsh-music-player EPUB reader', () => {
+  it('flattens a stored-zip epub to plain text in spine order with OPF metadata', () => {
+    const epub = buildEpub({
+      chapters: [
+        epubChapter('第一章 开始', '这是第一章的正文，包含 <b>加粗</b> 与 &amp; 实体，还有 &#20108; 字。'),
+        epubChapter('第二章 发展', '这是第二章的正文。'),
+      ],
+    })
+    const r = readEpubBuffer(epub)
+    expect(r.title).toBe('测试之书')
+    expect(r.author).toBe('测试作者')
+    // spine order preserved, headings on their own lines (h1 → newline)
+    expect(r.text.indexOf('第一章 开始')).toBeLessThan(r.text.indexOf('第二章 发展'))
+    expect(r.text).toContain('这是第一章的正文，包含 加粗 与 & 实体，还有 二 字。')
+    expect(r.text).toContain('这是第二章的正文。')
+  })
+
+  it('reads a deflate-compressed (method 8) epub', () => {
+    const epub = buildEpub({
+      compress: true,
+      chapters: [epubChapter('第一章 压缩', '这段来自被 deflate 压缩的章节。')],
+    })
+    const r = readEpubBuffer(epub)
+    expect(r.text).toContain('第一章 压缩')
+    expect(r.text).toContain('这段来自被 deflate 压缩的章节。')
+  })
+
+  it('reads an EPUB2 whose OPF uses namespace-prefixed tags (<opf:item>/<opf:itemref>)', () => {
+    // Regression: real-world EPUB2 files (e.g. so-novel exports) prefix the OPF
+    // tags with the package namespace; tag matching must be prefix-agnostic.
+    const epub = buildEpub({
+      nsPrefix: 'opf',
+      chapters: [epubChapter('第一章 前缀', '命名空间前缀的章节也能读到。')],
+    })
+    const r = readEpubBuffer(epub)
+    expect(r.title).toBe('测试之书')
+    expect(r.text).toContain('第一章 前缀')
+    expect(r.text).toContain('命名空间前缀的章节也能读到。')
+  })
+
+  it('drops nav/head/style and decodes numeric + named entities', () => {
+    const body = `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>不该出现</title></head><body>
+<nav epub:type="toc"><ol><li><a href="ch0.xhtml">目录入口</a></li></ol></nav>
+<p>正文段落，包含 &nbsp;空格&nbsp; 与 &#x4E8C;&#20108; 字。</p></body></html>`
+    const epub = buildEpub({ chapters: [body] })
+    const r = readEpubBuffer(epub)
+    expect(r.text).not.toContain('目录入口')
+    expect(r.text).not.toContain('不该出现')
+    expect(r.text).toContain('正文段落，包含 空格 与 二二 字。')
+  })
+
+  it('skips linear="no" spine items (endnotes/footnotes) for read-aloud', () => {
+    const epub = buildEpub({
+      chapters: [
+        epubChapter('第一章 正文', '主体内容。'),
+        epubChapter('注释', '这是尾注，不应被朗读。'),
+      ],
+      spineLinear: { ch1: 'no' },
+    })
+    const r = readEpubBuffer(epub)
+    expect(r.text).toContain('第一章 正文')
+    expect(r.text).not.toContain('尾注')
+  })
+
+  it('skips encrypted/DRM spine items instead of reading mojibake', () => {
+    const epub = buildEpub({
+      chapters: [
+        epubChapter('第一章 可读', '这段是明文。'),
+        epubChapter('第二章 加密', '这段被 DRM 加密，无法解密。'),
+      ],
+      encryptedPaths: ['OEBPS/ch1.xhtml'],
+    })
+    const r = readEpubBuffer(epub)
+    expect(r.text).toContain('第一章 可读')
+    expect(r.text).not.toContain('第二章 加密')
+  })
+
+  it('throws a clear Chinese error for bytes that are not a zip', () => {
+    expect(() => readEpubBuffer(Buffer.from('this is definitely not an epub', 'utf8'))).toThrow(/EPUB/)
+  })
+
+  it('zipReadEntry returns stored and deflate bytes, and raises on missing entries', () => {
+    const data = buildZip([
+      { name: 'a.txt', data: Buffer.from('hello stored', 'utf8') },
+      { name: 'b.txt', data: Buffer.from('hello deflate', 'utf8') },
+    ], true)
+    const entries = zipEntries(data)
+    expect(entries.length).toBe(2)
+    expect(zipReadEntry(data, entries, 'a.txt').toString()).toBe('hello stored')
+    expect(zipReadEntry(data, entries, 'b.txt').toString()).toBe('hello deflate')
+    expect(() => zipReadEntry(data, entries, 'missing.txt')).toThrow(/缺少条目/)
+  })
+
+  it('htmlToText converts blocks to lines and strips non-prose elements', () => {
+    const html = '<html><head><title>t</title><script>var x=1;</script></head><body>'
+      + '<h1>标题</h1><p>第一段 <span>内联</span></p><p>第二段</p>'
+      + '<svg><text>矢量字</text></svg><br/>换行后'
+      + '</body></html>'
+    const text = htmlToText(html)
+    expect(text).toContain('标题')
+    expect(text).not.toContain('var x')
+    expect(text).not.toContain('矢量字')
+    expect(text).toContain('第一段 内联')
+    expect(text).toContain('第二段')
+    expect(text).toContain('换行后')
+  })
+
+  it('decodeEntities handles numeric and named entities', () => {
+    expect(decodeEntities('a&amp;b&#x4E8C;&#20108;&ldquo;x&rdquo;')).toBe('a&b二二“x”')
+    expect(decodeEntities('&#x1F600;')).toBe('\u{1F600}')
+  })
+})
+
+describe('dsh-music-player EPUB as a book', () => {
+  it('lists .epub novels as books in the manifest', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: { 'test-novel.epub': buildEpub({ chapters: [epubChapter('第一章 开始', '正文。')] }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      expect(data.books.map((b) => b.name)).toEqual(['test-novel.epub'])
+      expect(data.tracks).toEqual([])
+    } finally { cleanup() }
+  })
+
+  it('serves OPF title/author + chapter sections from /book/<id>/meta', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: {
+        'test-novel.epub': buildEpub({
+          chapters: [
+            epubChapter('第一章 开始', '这是第一章的正文，句子长度足以形成多个分块。'),
+            epubChapter('第二章 发展', '这是第二章的正文。'),
+            epubChapter('尾声', '结束了。'),
+          ],
+        }),
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/meta' }), res)
+      expect(res.status).toBe(200)
+      const data = JSON.parse(res.body)
+      // OPF metadata wins over the heuristic filename guess ("test-novel")
+      expect(data.title).toBe('测试之书')
+      expect(data.author).toBe('测试作者')
+      expect(Array.isArray(data.sections)).toBe(true)
+      expect(data.sections.length).toBeGreaterThanOrEqual(2)
+      expect(data.sections[0].heading).toContain('第一章')
+      // every section maps to a valid chunk index
+      for (const sec of data.sections) {
+        expect(sec.fromChunk).toBeGreaterThanOrEqual(0)
+        expect(sec.fromChunk).toBeLessThan(data.total)
+      }
+    } finally { cleanup() }
+  })
+
+  it('serves readable chunk text from /book/<id>/text?from=n for an epub', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: { 'test-novel.epub': buildEpub({ chapters: [epubChapter('第一章 开始', '这是正文，足够长以便分块。')] }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/text?from=0' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.text).toContain('第一章')
+    } finally { cleanup() }
+  })
+
+  it('returns a clear 500 (not a crash) for a malformed .epub file', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: { 'broken.epub': 'definitely not a zip archive' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/meta' }), res)
+      expect(res.status).toBe(500)
+      expect(String(res.body)).toContain('EPUB')
     } finally { cleanup() }
   })
 })
