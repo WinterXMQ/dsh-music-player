@@ -362,6 +362,86 @@ describe('dsh-music-player client render smoke', () => {
     expect(controls.classList.contains('on')).toBe(false)
   })
 
+  it('draws a real precomputed FFT spectrum (8 bars) on the 46px canvas from the decoded track', async () => {
+    // The spectrum is computed offline (real FFT per 50ms window) during decodeAudioData
+    // and drawn as 8 log-spaced bars following currentTime. It must work WITHOUT touching
+    // the Web Audio output graph — the AnalyserNode routing approach broke this environment's
+    // Chromium media pipeline (getTopURL TypeError). FakeXHR delivers the arraybuffer, the
+    // fake AudioContext decodes it into a 440Hz sine, and a rAF tick must draw 8 bars.
+    class FakeXHR {
+      constructor() { this.response = new ArrayBuffer(1) }
+      open() {}
+      send() { if (typeof this.onload === 'function') this.onload() }
+    }
+    class FakeAudioContext {
+      constructor() { this.state = 'running' }
+      decodeAudioData() {
+        const sr = 8000
+        const ch = new Float32Array(sr)
+        for (let i = 0; i < sr; i++) ch[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / sr)
+        return Promise.resolve({ sampleRate: sr, duration: 1, numberOfChannels: 1, getChannelData: () => ch })
+      }
+      close() { this.state = 'closed' }
+    }
+    // FakeAudio.play() sets paused=false but never fires 'play' — subclass to dispatch it
+    // so s.playing becomes true and the viz canvas actually mounts.
+    class PlayAudio extends FakeAudio {
+      play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+    }
+    const rects = []
+    const fakeCtx = {
+      clearRect: () => {},
+      fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) },
+      fillStyle: '',
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    let rafCb = null
+    vi.stubGlobal('Audio', PlayAudio)
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    const origGetCtx = HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.getContext = () => fakeCtx
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // playing -> the 46px viz canvas is mounted
+      const canvas = container.querySelector('.dsh-music-viz')
+      expect(canvas).toBeTruthy()
+      expect(canvas.width).toBe(46)
+      // the decode populated the per-window FFT bands; a rAF tick draws 8 bars
+      // (plus optional 2px peak caps at the top — count only the bottom-anchored bars)
+      rects.length = 0
+      act(() => { rafCb() })
+      const bottom = canvas.height - 1
+      const bars = rects.filter((r) => r.y + r.h === bottom)
+      expect(bars.length).toBe(8)
+      expect(bars.every((r) => r.h >= 2)).toBe(true)
+      expect(fakeCtx.fillStyle).toBe('#2f9e6e')
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetCtx
+    }
+  })
+
   it('does NOT close the portaled volume/mode popups when clicking inside them', async () => {
     // Regression: the volume/mode popups are portaled to body (outside the bar DOM),
     // so the old outside-click check (button container only) closed them on ANY click
