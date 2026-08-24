@@ -254,11 +254,32 @@ describe('dsh-music-player client render smoke', () => {
     expect(html).toContain('M12 3v10.55')
   })
 
+  it('stays in the work state (no dim / controls expanded) when there is no playback content', async () => {
+    // 无播放内容（插件刚安装 / 点击停止）：播放条恒定工作态 —— 不透明度 100%、控件组
+    // 展开，不做「闲置/工作态」的特效（不半透明、不滑入滑出、时长不显示）。有内容时
+    // 才启用那些交互（由上面的 hover/dim 测试覆盖）。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl).toBeTruthy()
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    expect(controls).toBeTruthy()
+    // 无内容 → 恒定工作态：不加 dimmed、控件组 .on 展开、无时长
+    expect(barEl.classList.contains('dimmed')).toBe(false)
+    expect(controls.classList.contains('on')).toBe(true)
+    expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
+  })
+
   it('slides the right-side control buttons in/out on bar hover with a 1s slide-out delay', async () => {
     // Regression: the bar's right-side controls (heart/prev/play/next/stop/mode/
     // volume/panel) must be hidden by default and slide in on mouseenter, slide
     // out on mouseleave with a 1s delay (prevents accidental hide on a quick
-    // mouse-out) — while the time text stays visible.
+    // mouse-out). The time text is part of that foreground cluster: it also
+    // hides in the idle (collapsed) state and only shows while hovering.
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -274,8 +295,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(barEl).toBeTruthy()
     const controls = container.querySelector('.dsh-music-bar-controls')
     expect(controls).toBeTruthy()
-    // 默认隐藏：无 .on，时间仍在
+    // 默认隐藏：无 .on，闲置态时长一并隐藏（新行为：时长只在操作时显示）
     expect(controls.classList.contains('on')).toBe(false)
+    expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     // 播放条文件名去掉扩展名（本地音乐 a.mp3 -> a）；文件列表里仍保留 a.mp3
     const barName = container.querySelector('.dsh-music-bar-name')
     expect(barName).toBeTruthy()
@@ -289,6 +311,8 @@ describe('dsh-music-player client render smoke', () => {
       // 由原生 mouseover/mouseout 事件驱动（relatedTarget 为空 = 从外部进入/离开）。
       act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
+      // 操作态：时长显示
+      expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标离开 → 1s 延迟内按钮仍保持展开（防止误移出）
       act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
@@ -301,6 +325,8 @@ describe('dsh-music-player client render smoke', () => {
       expect(controls.classList.contains('on')).toBe(true) // 还在延迟内
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
+      // 离开后（闲置态）：时长一并隐藏
+      expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     } finally {
       vi.useRealTimers()
     }
@@ -327,12 +353,16 @@ describe('dsh-music-player client render smoke', () => {
     const controls = container.querySelector('.dsh-music-bar-controls')
     // 初始（未悬停）：半透明 dimmed
     expect(barEl.classList.contains('dimmed')).toBe(true)
+    // 闲置态时长隐藏（新行为）
+    expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     vi.useFakeTimers()
     try {
       // 鼠标移入 → 立即不透明（去 dimmed），控件组随之滑入
       act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       expect(controls.classList.contains('on')).toBe(true)
+      // 操作态时长显示（新行为）
+      expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标移出 → 1s 延迟内仍不透明（防误移出）
       act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
@@ -345,6 +375,8 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
       expect(barEl.classList.contains('dimmed')).toBe(true)
+      // 回到闲置态：时长再次隐藏（新行为）
+      expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     } finally {
       vi.useRealTimers()
     }
