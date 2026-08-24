@@ -28,6 +28,7 @@ vi.mock('../lib/qq.js', () => ({
   removeQQFav: vi.fn(),
   addSongToPlaylist: vi.fn(),
   createPlaylist: vi.fn(),
+  deletePlaylist: vi.fn(),
   deleteSongFromPlaylist: vi.fn(),
   getQQFavIds: vi.fn(),
   getTopLists: vi.fn(),
@@ -103,6 +104,7 @@ beforeEach(() => {
   vi.mocked(QQ.removeQQFav).mockResolvedValue(true)
   vi.mocked(QQ.addSongToPlaylist).mockResolvedValue(true)
   vi.mocked(QQ.deleteSongFromPlaylist).mockResolvedValue(true)
+  vi.mocked(QQ.deletePlaylist).mockResolvedValue(true)
   vi.mocked(QQ.createPlaylist).mockResolvedValue({ id: 555, name: '新歌单' })
   vi.mocked(QQ.getQQFavIds).mockResolvedValue({ ids: [123, 456], mids: ['a', 'b'] })
   vi.mocked(QQ.getTopLists).mockResolvedValue([{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 123 }] }])
@@ -367,6 +369,40 @@ describe('dsh-music-player QQ online routes', () => {
       await handler(makeReq({ url: '/dsh-music/qq/playlist-create', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '  ' }) }), res)
       expect(res.status).toBe(400)
       expect(JSON.parse(res.body).ok).toBe(false)
+    } finally { cleanup() }
+  })
+
+  it('deletes a user playlist via /dsh-music/qq/playlist-delete', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const body = JSON.stringify({ dirId: 444 })
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-delete', method: 'POST', headers: { 'content-type': 'application/json' }, body }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.deletePlaylist).toHaveBeenCalledWith(444, '')
+    } finally { cleanup() }
+  })
+
+  it('rejects a playlist delete without dirId via /dsh-music/qq/playlist-delete', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-delete', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }), res)
+      expect(res.status).toBe(400)
+      expect(JSON.parse(res.body).ok).toBe(false)
+    } finally { cleanup() }
+  })
+
+  it('surfaces a deletePlaylist failure via /dsh-music/qq/playlist-delete', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      vi.mocked(QQ.deletePlaylist).mockRejectedValue(new Error('「我喜欢」不可删除'))
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/playlist-delete', method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dirId: 201 }) }), res)
+      expect(res.status).toBe(502)
+      expect(JSON.parse(res.body).ok).toBe(false)
+      expect(JSON.parse(res.body).error).toContain('「我喜欢」不可删除')
     } finally { cleanup() }
   })
 

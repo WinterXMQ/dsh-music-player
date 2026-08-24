@@ -93,6 +93,8 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 | GET | `/dsh-music/qq/playlist-search?w=` | 歌单搜索 |
 | GET | `/dsh-music/qq/playlist/<id>` | 歌单详情（含歌曲列表，带 `songmid`） |
 | GET | `/dsh-music/qq/my-playlists` | 我的歌单（当前账号创建/收藏） |
+| POST | `/dsh-music/qq/playlist-create` | 创建自建歌单（`name`，返回 `{id,name}`） |
+| POST | `/dsh-music/qq/playlist-delete` | 删除自建歌单（`dirId`；「我喜欢」dirId=201 不可删） |
 
 ### 3.4 发现（排行榜 / 新歌）
 
@@ -181,7 +183,7 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 
 | 文件 | 职责 |
 |---|---|
-| `lib/qq.js` | QQ 音乐接口封装（登录/搜索/歌单/排行榜/新歌/收藏 + 工具函数） |
+| `lib/qq.js` | QQ 音乐接口封装（登录/搜索/歌单/删除歌单/排行榜/新歌/收藏 + 工具函数） |
 | `lib/index.js` | `/dsh-music/qq/*` 路由 + cookie 持久化 |
 | `lib/client.js` | 浏览器端 QQ 音乐 UI（登录/浏览/搜索/播放/收藏） |
 | `test/qq.test.js` / `test/qq-bigint.test.js` | 接口与工具函数测试 |

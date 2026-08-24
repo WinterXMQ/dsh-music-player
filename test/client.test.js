@@ -66,6 +66,10 @@ let bookMetaSections = []
 let qqLoggedIn = false
 // test hook: records /dsh-music/qq/fav POST bodies (action/song) for assertion.
 let favCalls = []
+// test hook: records /dsh-music/qq/playlist-delete POST bodies (dirId) + delete outcome.
+let delPlaylistCalls = []
+// test hook: makes the next /dsh-music/qq/playlist-delete POST fail (ok:false).
+let delPlaylistFail = false
 // test hook: records every /dsh-music/qq/* URL fetched, for asserting the
 // "未登录不发外部请求 / 登录后才加载" gate.
 let qqFetchLog = []
@@ -76,6 +80,11 @@ async function fetchStub(url, opts) {
   if (u === '/dsh-music/qq/fav' && o && o.method === 'POST') {
     try { favCalls.push(JSON.parse(o.body || '{}')) } catch {}
     return jsonRes({ ok: true, faved: true })
+  }
+  if (u === '/dsh-music/qq/playlist-delete' && o && o.method === 'POST') {
+    try { delPlaylistCalls.push(JSON.parse(o.body || '{}')) } catch {}
+    if (delPlaylistFail) return jsonRes({ ok: false, error: '删除失败（模拟）' })
+    return jsonRes({ ok: true })
   }
   if (u === '/dsh-music/manifest') return jsonRes(manifest)
   if (u === '/dsh-music/set-root') {
@@ -90,7 +99,10 @@ async function fetchStub(url, opts) {
     return jsonRes({ ok: true, isVip: false, results: [{ id: '123', songmid: '123', title: '晴天', artists: ['周杰伦'], album: '叶惠美', payplay: 0, source: 'qq' }] })
   }
   if (u === '/dsh-music/qq/my-playlists') {
-    return jsonRes({ ok: true, playlists: [{ id: 'mine1', name: '我的收藏', creator: '我', trackCount: 2, source: 'qq', dirId: 987, tid: 987 }] })
+    return jsonRes({ ok: true, playlists: [
+      { id: 'mine1', name: '我的收藏', creator: '我', trackCount: 2, source: 'qq', dirId: 987, tid: 987 },
+      { id: 'mine2', name: '第二个歌单', creator: '我', trackCount: 5, source: 'qq', dirId: 888, tid: 888 },
+    ] })
   }
   if (u === '/dsh-music/qq/playlist-categories') {
     return jsonRes({ ok: true, categories: [{ id: '1', name: '国语', group: '语种' }, { id: '2', name: '欧美', group: '语种' }] })
@@ -184,6 +196,8 @@ beforeEach(async () => {
   bookMetaSections = []
   qqLoggedIn = false
   favCalls = []
+  delPlaylistCalls = []
+  delPlaylistFail = false
   qqFetchLog = []
   manifest = baseManifest()
   await bootClient()
@@ -1291,6 +1305,128 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { mineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('我的收藏')
+  })
+
+  it('deletes a user playlist via the 我的歌单 card ✕ button after confirmation', async () => {
+    qqLoggedIn = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 「我的歌单」已自动加载（登录态）→ 找到删除按钮并点击，弹出确认框
+    const delBtn = [...container.querySelectorAll('.dsh-music-qq-mine-del')].find((b) => b.title.includes('我的收藏'))
+    expect(delBtn).toBeTruthy()
+    act(() => { delBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.textContent).toContain('删除歌单')
+    expect(container.textContent).toContain('我的收藏')
+    // 点「删除」确认 → 调用 Host 删除接口，卡片被移除
+    const confirmDel = [...document.body.querySelectorAll('.dsh-music-picker.confirm .dsh-music-settings-btn')].find((b) => b.textContent === '删除')
+    act(() => { confirmDel.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(delPlaylistCalls).toEqual([{ dirId: 987 }])
+    // mine1 已删除，mine2（第二个歌单）仍保留删除按钮
+    expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(1)
+    expect(container.textContent).not.toContain('我的收藏')
+  })
+
+  it('surfaces an error when deleting a playlist fails, keeping the card', async () => {
+    qqLoggedIn = true
+    delPlaylistFail = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const delBtn = [...container.querySelectorAll('.dsh-music-qq-mine-del')].find((b) => b.title.includes('我的收藏'))
+    act(() => { delBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const confirmDel = [...document.body.querySelectorAll('.dsh-music-picker.confirm .dsh-music-settings-btn')].find((b) => b.textContent === '删除')
+    act(() => { confirmDel.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(delPlaylistCalls).toEqual([{ dirId: 987 }])
+    // 失败时保留卡片并展示错误（两个歌单都保留）
+    expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(2)
+    expect(container.textContent).toContain('删除失败（模拟）')
+  })
+
+  it('shows the delete button ONLY on 我的歌单, never on 推荐/分类/搜索 playlists', async () => {
+    // Regression: playRow used to receive the Array#map index as its 2nd arg, so in
+    // 推荐/分类/搜索 (which call .map(playRow)) every card past the first wrongly got
+    // a delete button. The mine flag must be strict `true` (only 我的歌单 passes it).
+    qqLoggedIn = true
+    // 让搜索歌单返回多条，验证任意非「我的歌单」来源都不出现删除按钮。
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      const url = String(u)
+      if (url.includes('/dsh-music/qq/playlist-search')) {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, playlists: [
+          { id: '1001', name: '搜索歌单甲', creator: 'UP主', trackCount: 10, source: 'qq' },
+          { id: '1002', name: '搜索歌单乙', creator: 'UP主', trackCount: 20, source: 'qq' },
+          { id: '1003', name: '搜索歌单丙', creator: 'UP主', trackCount: 30, source: 'qq' },
+        ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // ① 我的歌单：登录自动加载，所有本人创建的歌单都应有删除按钮
+      expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(2)
+      // ② 推荐歌单：不应出现任何删除按钮
+      const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('热门推荐')
+      expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(0)
+      // ③ 分类歌单：不应出现任何删除按钮
+      const categoryTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '分类歌单')
+      act(() => { categoryTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const catChip = [...container.querySelectorAll('.dsh-music-qq-cat')].find((b) => b.textContent === '国语')
+      act(() => { catChip.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('国语歌单')
+      expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(0)
+      // ④ 搜索歌单：多条结果，任意一条都不应出现删除按钮（回归 Array#map index bug）
+      const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+      act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const input = container.querySelector('.dsh-music-qq-input')
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, '周杰伦')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const searchBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
+      act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 切到「相关歌单」
+      const plTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '相关歌单')
+      act(() => { plTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('搜索歌单甲')
+      expect(container.textContent).toContain('搜索歌单乙')
+      expect(container.textContent).toContain('搜索歌单丙')
+      expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(0)
+    } finally { window.fetch = origFetch }
   })
 
   it('does NOT fetch QQ data endpoints when not logged in', async () => {
