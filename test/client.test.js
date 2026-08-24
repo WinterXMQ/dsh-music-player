@@ -758,6 +758,11 @@ describe('dsh-music-player client render smoke', () => {
     expect(tocPanel.parentElement.contains(tocBtn)).toBe(true)
     // the popup anchors above the button via inline fixed positioning (anchorAbove)
     expect(tocPanel.style.position).toBe('fixed')
+    // TOC 用 bottom 锚定（tocAnchorAbove）：底边贴住按钮上方、不被视口顶部钳制
+    // 截断。jsdom 中 getBoundingClientRect 全零 → 走回退分支（bottom 被设置、top
+    // 为空）；真实浏览器则 bottom = 距视口底边距离，始终贴住按钮上方 6px。
+    expect(tocPanel.style.bottom).toBeTruthy()
+    expect(tocPanel.style.top).toBe('')
     const activeItems = toc.querySelectorAll('.dsh-music-toc-item.active')
     expect(activeItems.length).toBe(1)
     expect(activeItems[0].textContent).toContain('第三章 转')
