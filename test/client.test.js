@@ -228,6 +228,146 @@ describe('dsh-music-player client render smoke', () => {
     expect(html).toContain('M12 3v10.55')
   })
 
+  it('slides the right-side control buttons in/out on bar hover with a 1s slide-out delay', async () => {
+    // Regression: the bar's right-side controls (heart/prev/play/next/stop/mode/
+    // volume/panel) must be hidden by default and slide in on mouseenter, slide
+    // out on mouseleave with a 1s delay (prevents accidental hide on a quick
+    // mouse-out) — while the time text stays visible.
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // play a local track so the transport buttons are present
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl).toBeTruthy()
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    expect(controls).toBeTruthy()
+    // 默认隐藏：无 .on，时间仍在
+    expect(controls.classList.contains('on')).toBe(false)
+    expect(container.textContent).toContain('a.mp3')
+    // 用假定时器控制 1s 滑出延迟。
+    vi.useFakeTimers()
+    try {
+      // 鼠标进入播放条 → 控制按钮滑入（加 .on）。React 的 onMouseEnter/onMouseLeave
+      // 由原生 mouseover/mouseout 事件驱动（relatedTarget 为空 = 从外部进入/离开）。
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 鼠标离开 → 1s 延迟内按钮仍保持展开（防止误移出）
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 延迟内重新进入 → 取消隐藏，按钮保持展开
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { vi.advanceTimersByTime(1500) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 离开后超过 1s → 按钮滑出隐藏（去 .on）
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      expect(controls.classList.contains('on')).toBe(true) // 还在延迟内
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(controls.classList.contains('on')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    // 收藏/播放控制按钮在 controls 容器内
+    expect(controls.querySelector('.dsh-music-bar-btn.fav')).toBeTruthy()
+    expect([...controls.querySelectorAll('.dsh-music-bar-btn')].some((b) => b.title === '播放/暂停')).toBe(true)
+  })
+
+  it('keeps the controls expanded while the mode popup is open (portal hover fix)', async () => {
+    // Regression: the mode popup is portaled to body (outside the bar DOM), so moving
+    // the mouse onto it fires the bar's mouseleave. The buttons must NOT collapse
+    // while a popup is open, otherwise the popup detaches and mispositions.
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    expect(controls.classList.contains('on')).toBe(true)
+    // 打开模式弹窗（默认模式=顺序播放）
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '顺序播放')
+    expect(modeBtn).toBeTruthy()
+    act(() => { modeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 弹窗打开 → 即使鼠标移出播放条（mouseout 触发 mouseleave），按钮仍保持展开。
+    // 先开假定时器，让 mouseleave 安排的 1s 收起定时器成为假定时器，可被推进触发。
+    vi.useFakeTimers()
+    try {
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 鼠标移出超过 1s：barHover 变为 false，但弹窗打开期间 .on 仍由 anyPopOpen 保持
+      act(() => { vi.advanceTimersByTime(1200) })
+      expect(controls.classList.contains('on')).toBe(true)
+    } finally { vi.useRealTimers() }
+    // 选择「单曲循环」→ 弹窗关闭
+    const single = [...document.querySelectorAll('.dsh-music-mode-item')].find((b) => b.title.includes('单曲循环'))
+    expect(single).toBeTruthy()
+    act(() => { single.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // Regression: 弹窗关闭后 .on 必须立即随 anyPopOpen 收起（此时 barHover 已为 false、
+    // 鼠标已不在播放条上、不再触发 mouseleave），否则按钮组一直保持展开不折叠。
+    expect(controls.classList.contains('on')).toBe(false)
+  })
+
+  it('does NOT close the portaled volume/mode popups when clicking inside them', async () => {
+    // Regression: the volume/mode popups are portaled to body (outside the bar DOM),
+    // so the old outside-click check (button container only) closed them on ANY click
+    // including inside the popup. Must keep them open when the click target is inside.
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    // ---- 音量弹窗：打开后点击弹窗内部不应关闭 ----
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const volPop = document.querySelector('.dsh-music-bar-vol-pop')
+    expect(volPop).toBeTruthy()
+    // 点击弹窗内部（音量滑块容器）→ 弹窗保持打开
+    act(() => { volPop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.querySelector('.dsh-music-bar-vol-pop')).toBeTruthy()
+    // 点击播放条之外的空白处 → 弹窗关闭
+    act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.querySelector('.dsh-music-bar-vol-pop')).toBeNull()
+    // ---- 模式弹窗：打开后点击弹窗内部选项不应被「外部点击」误关闭 ----
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '顺序播放')
+    act(() => { modeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const modePop = document.querySelector('.dsh-music-mode-pop')
+    expect(modePop).toBeTruthy()
+    // 点击弹窗内部（空白处，非选项按钮）→ 弹窗保持打开
+    act(() => { modePop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.querySelector('.dsh-music-mode-pop')).toBeTruthy()
+    // 点击弹窗内一个选项 → 选项生效且弹窗关闭
+    const shuffle = [...document.querySelectorAll('.dsh-music-mode-item')].find((b) => b.title.includes('乱序播放'))
+    act(() => { shuffle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.querySelector('.dsh-music-mode-pop')).toBeNull()
+  })
+
   it('opens the panel, shows subtabs, and renders the playlist detail with a 清空 button', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -479,13 +619,14 @@ describe('dsh-music-player client render smoke', () => {
     const toc = container.querySelector('.dsh-music-toc-list')
     expect(toc).toBeTruthy()
     // the popup must be a child of the button's relative wrapper (same anchor
-    // pattern as the volume/mode popups — CSS positions it above the button)
+    // pattern as the volume/mode popups — CSS positions it above the button).
+    // 测试环境未提供 react-dom，portal 走内联回退（生产环境 portal 到 body）。
     const tocPanel = toc.closest('.dsh-music-toc')
     expect(tocPanel).toBeTruthy()
     expect(tocPanel.parentElement.classList.contains('dsh-music-toc-trigger')).toBe(true)
     expect(tocPanel.parentElement.contains(tocBtn)).toBe(true)
-    // the popup uses the absolute-above-button positioning (no inline geometry)
-    expect(tocPanel.style.position).toBe('')
+    // the popup anchors above the button via inline fixed positioning (anchorAbove)
+    expect(tocPanel.style.position).toBe('fixed')
     const activeItems = toc.querySelectorAll('.dsh-music-toc-item.active')
     expect(activeItems.length).toBe(1)
     expect(activeItems[0].textContent).toContain('第三章 转')
