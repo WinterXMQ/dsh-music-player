@@ -2046,6 +2046,31 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('shows the local music quality chip (FLAC · 无损) on the bar', async () => {
+    // 本地音乐：扫描时解析文件头得到「格式 · 档位」，startPlay 把 track.quality 写入
+    // currentQuality，播放条显示品质芯片；与在线 QQ 的「QQ音乐 · 无损」互不叠加。
+    manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损' }] }
+    vi.resetModules()
+    localStorage.clear()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.flac'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 播放条带本地音质芯片
+    expect(container.textContent).toContain('FLAC · 无损')
+    // 不会叠加在线 QQ 徽标
+    expect(container.textContent).not.toContain('QQ音乐 · 无损')
+  })
+
   it('shows the QQ online lyric in the bar (idle state) with translation merged', async () => {
     // P2：在线 QQ 歌词。QQ 播放走 startQQPlayback（不走 startPlay），歌词从
     // /dsh-music/qq/lyric 按 songmid 取；有逐句翻译时合并为「原文 ／ 翻译」。

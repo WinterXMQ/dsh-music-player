@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path'
 import {
   apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS,
   zipEntries, zipReadEntry, htmlToText, decodeEntities, readEpubBuffer, qqQualityLabel,
+  parseAudioMeta, audioQualityLabel,
 } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
@@ -1241,6 +1242,164 @@ describe('dsh-music-player QQ quality label (qqQualityLabel)', () => {
     expect(qqQualityLabel(null)).toBe('')
     expect(qqQualityLabel(undefined)).toBe('')
     expect(qqQualityLabel('XYZabcdefabcdef.weird')).toBe('')
+  })
+})
+
+describe('dsh-music-player local audio quality (parseAudioMeta)', () => {
+  // ---- 各格式文件头构造器（覆盖解析器读取的偏移）----
+  function flacBytes({ rate = 44100, ch = 2, bits = 16, total = 44100 * 60 } = {}) {
+    const b = Buffer.alloc(42)
+    b.write('fLaC', 0, 'ascii')
+    b[4] = 0x00 // STREAMINFO（非 last）
+    b.writeUIntBE(34, 5, 3)
+    const v = (BigInt(rate) << 44n) | (BigInt(ch - 1) << 41n) | (BigInt(bits - 1) << 36n) | BigInt(total)
+    b.writeUInt32BE(Number(v >> 32n), 18)
+    b.writeUInt32BE(Number(v & 0xffffffffn), 22)
+    return b
+  }
+  function wavBytes({ rate = 44100, ch = 2, bits = 16 } = {}) {
+    const fmt = Buffer.alloc(24)
+    fmt.write('fmt ', 0, 'ascii'); fmt.writeUInt32LE(16, 4); fmt.writeUInt16LE(1, 8)
+    fmt.writeUInt16LE(ch, 10); fmt.writeUInt32LE(rate, 12); fmt.writeUInt32LE(rate * ch * bits / 8, 16)
+    fmt.writeUInt16LE(ch * bits / 8, 20); fmt.writeUInt16LE(bits, 22)
+    const data = Buffer.alloc(8); data.write('data', 0, 'ascii'); data.writeUInt32LE(0, 4)
+    const body = Buffer.concat([fmt, data])
+    const out = Buffer.alloc(12 + body.length)
+    out.write('RIFF', 0, 'ascii'); out.writeUInt32LE(4 + body.length, 4); out.write('WAVE', 8, 'ascii')
+    body.copy(out, 12)
+    return out
+  }
+  function aiffBytes({ rate = 44100, ch = 2, bits = 16 } = {}) {
+    const comm = Buffer.alloc(26)
+    comm.write('COMM', 0, 'ascii'); comm.writeUInt32BE(18, 4); comm.writeUInt16BE(ch, 8)
+    comm.writeUInt32BE(0, 10); comm.writeUInt16BE(bits, 14)
+    const e = Math.floor(Math.log2(rate))
+    const mant = (rate / 2 ** e) * 2 ** 63
+    comm.writeUInt16BE(e + 16383, 16); comm.writeUInt32BE(Math.floor(mant / 2 ** 32), 18); comm.writeUInt32BE((mant >>> 0) >>> 0, 22)
+    const form = Buffer.alloc(12 + comm.length)
+    form.write('FORM', 0, 'ascii'); form.writeUInt32BE(comm.length + 4, 4); form.write('AIFF', 8, 'ascii')
+    comm.copy(form, 12)
+    return form
+  }
+  function mp3Bytes({ kbps = 320, withId3 = false } = {}) {
+    const idx = { 32: 1, 40: 2, 48: 3, 56: 4, 64: 5, 80: 6, 96: 7, 112: 8, 128: 9, 160: 10, 192: 11, 224: 12, 256: 13, 320: 14 }[kbps]
+    const frame = Buffer.alloc(64) // 足够长，避免 <8 字节早退
+    frame[0] = 0xff; frame[1] = 0xfb // MPEG1 LayerIII
+    frame[2] = (idx << 4) | 0x02 // bitrate + samplerate index 0 (44100)
+    frame[3] = 0x00 // 双声道
+    if (!withId3) return frame
+    const id3 = Buffer.alloc(10); id3.write('ID3', 0, 'ascii'); id3[3] = 4; id3[4] = 0; id3[5] = 0
+    return Buffer.concat([id3, frame])
+  }
+  function m4aBytes({ rate = 44100, ch = 2, bits = 16, durSec = 240 } = {}) {
+    const box = (type, body) => {
+      const out = Buffer.alloc(8 + body.length)
+      out.writeUInt32BE(8 + body.length, 0); out.write(type, 4, 'ascii'); body.copy(out, 8)
+      return out
+    }
+    const mvhdBody = Buffer.alloc(20)
+    mvhdBody[0] = 0 // version 0
+    mvhdBody.writeUInt32BE(1000, 12) // timescale
+    mvhdBody.writeUInt32BE(durSec * 1000, 16) // duration
+    const mp4aBody = Buffer.alloc(28)
+    mp4aBody.writeUInt16BE(ch, 16) // channelcount
+    mp4aBody.writeUInt16BE(bits, 18) // samplesize
+    mp4aBody.writeUInt32BE(Math.round(rate * 65536), 24) // samplerate 16.16
+    const stsdBody = Buffer.alloc(8); stsdBody.writeUInt32BE(1, 4)
+    const stsd = box('stsd', Buffer.concat([stsdBody, box('mp4a', mp4aBody)]))
+    const moov = box('moov', Buffer.concat([box('mvhd', mvhdBody), stsd]))
+    const ftypBody = Buffer.alloc(8); ftypBody.write('M4A ', 0, 'ascii'); ftypBody.writeUInt32BE(0, 4)
+    return Buffer.concat([box('ftyp', ftypBody), moov])
+  }
+  function oggVorbisBytes({ rate = 44100, ch = 2, bitrate = 320000 } = {}) {
+    const ident = Buffer.alloc(28)
+    ident[0] = 1; Buffer.from('vorbis', 'ascii').copy(ident, 1)
+    ident.writeUInt32LE(0, 7); ident[11] = ch; ident.writeUInt32LE(rate, 12); ident.writeUInt32LE(bitrate, 20)
+    const page = Buffer.alloc(28 + ident.length)
+    page.write('OggS', 0, 'ascii'); page[4] = 0; page[5] = 2; page[26] = 1; page[27] = ident.length
+    ident.copy(page, 28)
+    return page
+  }
+  function oggOpusBytes({ rate = 48000, ch = 2 } = {}) {
+    const head = Buffer.alloc(19)
+    head.write('OpusHead', 0, 'ascii'); head[8] = 1; head[9] = ch; head.writeUInt16LE(312, 10); head.writeUInt32LE(rate, 12); head.writeUInt16LE(0, 16); head[18] = 0
+    const page = Buffer.alloc(28 + head.length)
+    page.write('OggS', 0, 'ascii'); page[4] = 0; page[5] = 2; page[26] = 1; page[27] = head.length
+    head.copy(page, 28)
+    return page
+  }
+
+  it('FLAC → 无损，带采样率/位深/声道', () => {
+    const m = parseAudioMeta(flacBytes())
+    expect(m).toMatchObject({ codec: 'FLAC', sampleRate: 44100, channels: 2, bitDepth: 16, tier: '无损' })
+  })
+  it('WAV → 无损，带采样率/位深/声道', () => {
+    expect(parseAudioMeta(wavBytes())).toMatchObject({ codec: 'WAV', sampleRate: 44100, channels: 2, bitDepth: 16, tier: '无损' })
+  })
+  it('AIFF → 无损，80 位扩展浮点采样率解码正确', () => {
+    expect(parseAudioMeta(aiffBytes())).toMatchObject({ codec: 'AIFF', sampleRate: 44100, channels: 2, bitDepth: 16, tier: '无损' })
+  })
+  it('MP3 320k → 高音质；128k → 标准', () => {
+    expect(parseAudioMeta(mp3Bytes({ kbps: 320 }))).toMatchObject({ codec: 'MP3', bitrateKbps: 320, sampleRate: 44100, tier: '高音质' })
+    expect(parseAudioMeta(mp3Bytes({ kbps: 128 }))).toMatchObject({ codec: 'MP3', bitrateKbps: 128, tier: '标准' })
+  })
+  it('MP3 带 ID3v2 标签也能解析', () => {
+    expect(parseAudioMeta(mp3Bytes({ kbps: 256, withId3: true }))).toMatchObject({ codec: 'MP3', bitrateKbps: 256, tier: '高音质' })
+  })
+  it('M4A/AAC 按文件大小与时长估码率分档', () => {
+    const hi = parseAudioMeta(m4aBytes({ durSec: 240 }), '', 5 * 1024 * 1024) // ~175kbps
+    expect(hi).toMatchObject({ codec: 'AAC', sampleRate: 44100, channels: 2 })
+    expect(hi.bitrateKbps).toBeGreaterThan(0)
+    const lo = parseAudioMeta(m4aBytes({ durSec: 600 }), '', 4 * 1024 * 1024) // ~55kbps
+    expect(lo.tier).toBe('标准')
+  })
+  it('OGG Vorbis 高码率 → 高音质；低码率 → 标准', () => {
+    expect(parseAudioMeta(oggVorbisBytes({ bitrate: 320000 }))).toMatchObject({ codec: 'OGG', sampleRate: 44100, tier: '高音质' })
+    expect(parseAudioMeta(oggVorbisBytes({ bitrate: 128000 }))).toMatchObject({ codec: 'OGG', tier: '标准' })
+  })
+  it('OGG Opus → 高音质', () => {
+    expect(parseAudioMeta(oggOpusBytes())).toMatchObject({ codec: 'Opus', sampleRate: 48000, channels: 2, tier: '高音质' })
+  })
+  it('无法识别的字节 → null（无标签）', () => {
+    expect(parseAudioMeta(Buffer.from('this is just text', 'utf8'))).toBeNull()
+    expect(parseAudioMeta(Buffer.alloc(4))).toBeNull()
+  })
+  it('audioQualityLabel 拼成「格式 · 档位」', () => {
+    expect(audioQualityLabel({ codec: 'FLAC', tier: '无损' })).toBe('FLAC · 无损')
+    expect(audioQualityLabel({ codec: 'MP3', tier: '高音质' })).toBe('MP3 · 高音质')
+    expect(audioQualityLabel({ codec: 'AAC', tier: '' })).toBe('AAC')
+    expect(audioQualityLabel(null)).toBe('')
+  })
+
+  it('识别「ID3 前缀 + 真实容器」的文件（部分下载工具给 FLAC 贴 ID3）→ 无损而非误判 MP3', () => {
+    // 真实库里的 .flac 常带 ID3v2 前缀：跳完标签后必须按内容识别成 FLAC，
+    // 而不是在 FLAC 数据里误找 MPEG 同步而错标成 MP3（回归）。
+    const id3 = Buffer.alloc(10)
+    id3.write('ID3', 0, 'ascii'); id3[3] = 4; id3[4] = 0; id3[5] = 0
+    const combo = Buffer.concat([id3, flacBytes()])
+    expect(parseAudioMeta(combo)).toMatchObject({ codec: 'FLAC', tier: '无损' })
+    // 无标签前缀的正常 FLAC 不受影响
+    expect(parseAudioMeta(flacBytes())).toMatchObject({ codec: 'FLAC', tier: '无损' })
+  })
+
+  it('reports local track quality in the manifest (扫描时解析文件头)', async () => {
+    const { handler, cleanup } = boot({
+      musicFiles: {
+        'song.flac': flacBytes(),
+        'song.mp3': mp3Bytes({ kbps: 128 }),
+        'garbage.mp3': 'not really an mp3, just text', // 解析不出 → 无标签
+      },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      const byName = Object.fromEntries(data.tracks.map((t) => [t.name, t.quality]))
+      expect(byName['song.flac']).toBe('FLAC · 无损')
+      expect(byName['song.mp3']).toBe('MP3 · 标准')
+      expect(byName['garbage.mp3']).toBe('')
+    } finally { cleanup() }
   })
 })
 
