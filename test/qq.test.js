@@ -108,7 +108,7 @@ beforeEach(() => {
   vi.mocked(QQ.createPlaylist).mockResolvedValue({ id: 555, name: '新歌单' })
   vi.mocked(QQ.getQQFavIds).mockResolvedValue({ ids: [123, 456], mids: ['a', 'b'] })
   vi.mocked(QQ.getTopLists).mockResolvedValue([{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 123 }] }])
-  vi.mocked(QQ.getTopListSongs).mockResolvedValue({ id: '62', name: '飙升榜', songs: [{ id: 'm1', songmid: 'm1', title: '飙升歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
+  vi.mocked(QQ.getTopListSongs).mockResolvedValue({ id: '62', name: '飙升榜', total: 100, hasMore: true, cover: '', updateTime: '', songs: [{ id: 'm1', songmid: 'm1', title: '飙升歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
   vi.mocked(QQ.getNewSongs).mockResolvedValue({ type: 5, label: '最新', songs: [{ id: 'n1', songmid: 'n1', title: '新歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
 })
 afterEach(() => {
@@ -464,8 +464,20 @@ describe('dsh-music-player QQ online routes', () => {
       await handler(makeReq({ url: '/dsh-music/qq/top-songs?topId=62' }), res)
       const data = JSON.parse(res.body)
       expect(data.ok).toBe(true)
-      expect(QQ.getTopListSongs).toHaveBeenCalledWith('62', expect.any(String))
+      expect(QQ.getTopListSongs).toHaveBeenCalledWith('62', expect.any(String), 0, 30)
       expect(data.toplist.songs[0].title).toBe('飙升歌')
+      expect(data.toplist.hasMore).toBe(true)
+    } finally { cleanup() }
+  })
+
+  it('forwards offset/num for paginated top-songs', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/top-songs?topId=62&offset=30&num=30' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.getTopListSongs).toHaveBeenCalledWith('62', expect.any(String), 30, 30)
     } finally { cleanup() }
   })
 

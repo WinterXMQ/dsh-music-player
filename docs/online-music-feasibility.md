@@ -101,7 +101,7 @@ GET /dsh-music/qq/play/<songmid>     → Host 用 vkey 接口换取真实音频 
 | 方法 | 端点 | 说明 |
 |---|---|---|
 | GET | `/dsh-music/qq/top-lists` | 排行榜全部分组（巅峰榜/地区榜/特色榜等） |
-| GET | `/dsh-music/qq/top-songs?topId=` | 某榜单歌曲列表（带 `songmid`） |
+| GET | `/dsh-music/qq/top-songs?topId=&offset=&num=` | 某榜单歌曲列表（带 `songmid`；`offset`/`num` 分页，返回 `total`/`hasMore` 支持加载更多） |
 | GET | `/dsh-music/qq/new-songs?type=` | 新歌速递（type 5 最新 / 1 内地 / 6 港台 / 2 欧美 / 4 韩国） |
 
 ### 3.5 收藏「我喜欢」

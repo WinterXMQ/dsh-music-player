@@ -110,6 +110,22 @@ async function fetchStub(url, opts) {
   if (u.includes('/dsh-music/qq/playlist-search')) {
     return jsonRes({ ok: true, playlists: [{ id: 's1', name: '周杰伦合集', creator: 'UP主', trackCount: 100, source: 'qq' }] })
   }
+  if (u === '/dsh-music/qq/top-lists') {
+    return jsonRes({ ok: true, groups: [{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 12345 }] }] })
+  }
+  if (u.includes('/dsh-music/qq/top-songs')) {
+    const offset = parseInt(new URL('http://x' + u).searchParams.get('offset') || '0', 10) || 0
+    // 榜单共 5 首，每页 2 首：offset 0 -> [a,b], 2 -> [c,d], 4 -> [e]
+    const all = [
+      { id: 'a', songmid: 'a', title: '飙升歌一', artists: ['歌手1'], payplay: 0, source: 'qq' },
+      { id: 'b', songmid: 'b', title: '飙升歌二', artists: ['歌手2'], payplay: 0, source: 'qq' },
+      { id: 'c', songmid: 'c', title: '飙升歌三', artists: ['歌手3'], payplay: 0, source: 'qq' },
+      { id: 'd', songmid: 'd', title: '飙升歌四', artists: ['歌手4'], payplay: 0, source: 'qq' },
+      { id: 'e', songmid: 'e', title: '飙升歌五', artists: ['歌手5'], payplay: 0, source: 'qq' },
+    ]
+    const page = all.slice(offset, offset + 2)
+    return jsonRes({ ok: true, toplist: { id: '62', name: '飙升榜', cover: 'https://x.jpg', total: all.length, hasMore: offset + page.length < all.length, songs: page } })
+  }
   if (u === '/dsh-music/qq/liked') {
     return jsonRes({ ok: true, ids: [789001, 999], mids: ['789', '999'] })
   }
@@ -819,6 +835,47 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { catChip.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('国语歌单')
+  })
+
+  it('loads more QQ 排行榜 songs via the 加载更多 button (append + hasMore)', async () => {
+    qqLoggedIn = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 切到 排行榜 → 点「飙升榜」进入详情
+    const topsTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '排行榜')
+    act(() => { topsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升榜')
+    const card = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('飙升榜'))
+    act(() => { card.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 第一页：2 首 + 总数 5 + 还有更多
+    expect(container.textContent).toContain('飙升歌一')
+    expect(container.textContent).toContain('飙升歌二')
+    expect(container.textContent).toContain('2 / 5 首')
+    const moreBtn = [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].find((b) => b.textContent === '加载更多')
+    expect(moreBtn).toBeTruthy()
+    // 点加载更多 → 追加下一页
+    act(() => { moreBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升歌三')
+    expect(container.textContent).toContain('飙升歌四')
+    expect(container.textContent).toContain('4 / 5 首')
+    // 再点 → 最后一首，hasMore=false 后按钮消失
+    const moreBtn2 = [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].find((b) => b.textContent === '加载更多')
+    act(() => { moreBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升歌五')
+    expect(container.textContent).toContain('5 / 5 首')
+    expect([...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].some((b) => b.textContent === '加载更多')).toBe(false)
   })
 
   it('loads more recommended playlists via the 加载更多 button (deduped append)', async () => {
