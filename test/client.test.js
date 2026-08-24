@@ -57,6 +57,9 @@ function makePlaylist(id, name, fixed, paths) {
 function jsonRes(obj) {
   return Promise.resolve({ ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) })
 }
+// 与客户端一致：字幕行长度按「去标点后的字数」计（标点不计入）。
+const subPunct = '，。！？…：；、“”‘’（）《》—～·`~!@#$%^&*()-_=+[]{};\':",.<>/?\\|'
+const subContentLen = (s) => [...String(s)].filter((c) => !subPunct.includes(c) && !/\s/.test(c)).length
 // records the last /dsh-music/files path requested (to assert the initial dir)
 let lastFilesUrl = null
 // test hook: sections served for /dsh-music/book/*/meta (set before bootClient so
@@ -1020,9 +1023,10 @@ describe('dsh-music-player client render smoke', () => {
       // idle (non-hovered) bar shows the subtitle line
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
-      // the whole dialogue is one line: the 。？ inside “...” didn't cut it
-      expect(lyric.textContent).toContain('他说：“你来了吗？”她点头。')
-      expect(lyric.textContent).toContain('你来了吗？”')
+      // the dialogue (with its speaker tag) is its own line, ending at the closing quote:
+      // the 。? inside “...” didn't split it, and the trailing text is a separate line.
+      expect(lyric.textContent).toContain('他说：“你来了吗？”')
+      expect(lyric.textContent).not.toContain('她点头')
     } finally {
       bookTextFixture = ''
     }
@@ -1085,13 +1089,147 @@ describe('dsh-music-player client render smoke', () => {
         const el = container.querySelector('.dsh-music-bar-lyric')
         if (el && el.textContent) seen.add(el.textContent)
       }
-      // the long sentence wrapped into multiple lines, and each line ≤ 20
+      // the long sentence wrapped into multiple lines, each line ≤ 20 汉字(去标点)
       expect(seen.size).toBeGreaterThan(1)
-      for (const line of seen) expect(line.length).toBeLessThanOrEqual(20)
+      for (const line of seen) expect(subContentLen(line)).toBeLessThanOrEqual(20)
       // the quoted dialogue stays on a single line (never split inside “”)
       const holder = [...seen].find((l) => l.includes('“我们走吧'))
       expect(holder).toBeTruthy()
       expect(holder).toContain('我们走吧。”')
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
+  it('breaks a long quoted dialogue at its internal commas instead of a hard cut', async () => {
+    // A single quoted dialogue longer than 20 content chars: when it must be
+    // split, the cut should land on a comma (inside the quote) — a graceful
+    // clause pause, NOT a hard slice at the content boundary.
+    const audios = []
+    class LongQuoteAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长对话测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他说：“我们先商量一下，然后再做决定，千万不要冲动。”'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LongQuoteAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('长对话测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      const seen = new Set()
+      for (let t = 0; t <= 9.9; t += 0.05) {
+        audio.currentTime = t
+        act(() => { audio.emit('timeupdate') })
+        const el = container.querySelector('.dsh-music-bar-lyric')
+        if (el && el.textContent) seen.add(el.textContent)
+      }
+      // the long dialogue split into several lines, each ≤20 content chars
+      expect(seen.size).toBeGreaterThan(1)
+      for (const line of seen) expect(subContentLen(line)).toBeLessThanOrEqual(20)
+      // every cut lands on a clause pause (comma) — never a bare hard slice
+      for (const line of seen) expect(line.endsWith('，') || line.endsWith('。”')).toBe(true)
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
+  it('breaks a long quoted dialogue at its internal 。！？ (sentence-end inside quotes) too', async () => {
+    // splitSentences skips 。！？ inside quotes (only breaks at the closing quote),
+    // so a long quoted dialogue may contain internal sentence ends. wrapSubtitleLine
+    // must also cut at those 。！？ — not hard-slice mid-content.
+    const audios = []
+    class LongQuotePauseAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长标点测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他说：“句子一。句子二？句子三。句子四。句子五。句子六。句子七。”'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LongQuotePauseAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('长标点测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      const seen = new Set()
+      for (let t = 0; t <= 9.9; t += 0.05) {
+        audio.currentTime = t
+        act(() => { audio.emit('timeupdate') })
+        const el = container.querySelector('.dsh-music-bar-lyric')
+        if (el && el.textContent) seen.add(el.textContent)
+      }
+      // split into several lines, each ≤20 content chars, and every cut lands on 。！？，
+      const enders = new Set('，。？！：；”')
+      expect(seen.size).toBeGreaterThan(1)
+      for (const line of seen) {
+        expect(subContentLen(line)).toBeLessThanOrEqual(20)
+        expect(enders.has(line.trim().slice(-1))).toBe(true) // 断在标点，不裸切
+      }
     } finally {
       bookTextFixture = ''
     }
