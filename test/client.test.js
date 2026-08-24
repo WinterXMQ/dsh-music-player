@@ -274,6 +274,71 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
   })
 
+  it('renders a 1px progress line at the bar bottom that fills with playback', async () => {
+    // 播放进度细线：有内容且已获取时长时，在播放条底部渲染一条与播放条等宽、高 1px
+    // 的细线，填充宽度 = position/duration * 100%；无内容/无时长时不渲染。
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 无时长（duration 为 0）：细线不渲染
+      expect(container.querySelector('.dsh-music-bar-progress')).toBeNull()
+      // 有时长后：进度 50/200 = 25%（duration 由 durationchange 事件写入 store）
+      audio.duration = 200
+      audio.currentTime = 50
+      act(() => { audio.emit('durationchange') })
+      act(() => { audio.emit('timeupdate') })
+      const progress = container.querySelector('.dsh-music-bar-progress')
+      expect(progress).toBeTruthy()
+      const fill = container.querySelector('.dsh-music-bar-progress-fill')
+      expect(fill).toBeTruthy()
+      expect(fill.style.width).toBe('25%')
+      // 推进到末尾 → 100%
+      audio.currentTime = 200
+      act(() => { audio.emit('timeupdate') })
+      expect(container.querySelector('.dsh-music-bar-progress-fill').style.width).toBe('100%')
+      // 细线是播放条的直接子节点（绝对定位、等宽于播放条）
+      const barEl = container.querySelector('.dsh-music-bar')
+      expect(progress.parentNode).toBe(barEl)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('slides the right-side control buttons in/out on bar hover with a 1s slide-out delay', async () => {
     // Regression: the bar's right-side controls (heart/prev/play/next/stop/mode/
     // volume/panel) must be hidden by default and slide in on mouseenter, slide
