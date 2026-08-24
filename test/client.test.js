@@ -1023,19 +1023,17 @@ describe('dsh-music-player client render smoke', () => {
       // idle (non-hovered) bar shows the subtitle line
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
-      // the dialogue (with its speaker tag) is its own line, ending at the closing quote:
-      // the 。? inside “...” didn't split it, and the trailing text is a separate line.
-      expect(lyric.textContent).toContain('他说：“你来了吗？”')
-      expect(lyric.textContent).not.toContain('她点头')
+      // the whole sentence is one line (content ≤20): the 。? inside “...” didn't split it
+      expect(lyric.textContent).toContain('他说：“你来了吗？”她点头。')
+      expect(lyric.textContent).toContain('你来了吗？”')
     } finally {
       bookTextFixture = ''
     }
   })
 
   it('wraps long AI 讲书 subtitle lines adaptively, each no longer than 20 chars', async () => {
-    // A single long sentence (>20) full of commas: splitSentences must wrap it
-    // into ≤20-char lines at the natural clause pauses, and never split a
-    // quoted dialogue in the process.
+    // A single long chunk (>20 content chars) full of commas: it must wrap into
+    // ≤20-char lines at the natural clause pauses, and keep the dialogue whole.
     const audios = []
     class WrapAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -1248,7 +1246,7 @@ describe('dsh-music-player client render smoke', () => {
     vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '加权测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
-    bookTextFixture = '这一段是第一个句子内容，它比较长。短。'
+    bookTextFixture = '甲，乙，丙，丁，戊，己，庚，辛，壬，癸，子，丑，寅，卯，辰，巳，午，未，申，酉，戌，亥。'
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', WeightAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -1290,13 +1288,13 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { audio.emit('timeupdate') })
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
-      // the long line still shows, NOT the 2-char short line
-      expect(lyric.textContent).toContain('第一个句子内容')
-      expect(lyric.textContent).not.toContain('短')
+      // the long first line (20 content chars) still shows, NOT the 2-char second line
+      expect(lyric.textContent).toContain('甲')
+      expect(lyric.textContent).not.toContain('亥')
       // and the early part of the chunk keeps the same long line
       audio.currentTime = 1
       act(() => { audio.emit('timeupdate') })
-      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toContain('第一个句子内容')
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toContain('甲')
     } finally {
       bookTextFixture = ''
     }
