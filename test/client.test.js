@@ -73,10 +73,20 @@ let delPlaylistFail = false
 // test hook: records every /dsh-music/qq/* URL fetched, for asserting the
 // "未登录不发外部请求 / 登录后才加载" gate.
 let qqFetchLog = []
+// test hook: /dsh-music/lyric?path= response (parsed LRC or {ok:false}).
+let lyricFixture = null
+// test hook: /dsh-music/qq/lyric?songmid= response (QQ lyric + optional trans).
+let qqLyricFixture = null
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
   if (String(u).startsWith('/dsh-music/qq/')) qqFetchLog.push(u.split('?')[0])
+  if (u.startsWith('/dsh-music/lyric?path=')) {
+    return jsonRes(lyricFixture || { ok: false, hasLrc: false })
+  }
+  if (u.startsWith('/dsh-music/qq/lyric?songmid=')) {
+    return jsonRes(qqLyricFixture || { ok: false, error: 'no lyric' })
+  }
   if (u === '/dsh-music/qq/fav' && o && o.method === 'POST') {
     try { favCalls.push(JSON.parse(o.body || '{}')) } catch {}
     return jsonRes({ ok: true, faved: true })
@@ -896,6 +906,52 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).not.toContain('自动播放')
   })
 
+  it('shows the current lyric line in the bar only in the idle (collapsed-controls) state', async () => {
+    // 需求规格：歌词位于频谱之后、时长之前，且仅"非使用态"（控件组已滑动折叠、
+    // 播放条半透明 dimmed）显示；鼠标进入操作时收起，不给滑入的按钮让路。
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const barEl = container.querySelector('.dsh-music-bar')
+      // 闲置态（控件组折叠、半透明）：歌词显示，且为当前行（currentTime=0 → 第一句）
+      expect(barEl.classList.contains('dimmed')).toBe(true)
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('第一句歌词')
+      // 歌词在 .dsh-music-bar-controls（时长）之前、频谱之后（DOM 顺序断言）
+      const controls = container.querySelector('.dsh-music-bar-controls')
+      const idxLyric = [...barEl.children].indexOf(lyric)
+      const idxControls = [...barEl.children].indexOf(controls)
+      expect(idxLyric).toBeGreaterThanOrEqual(0)
+      expect(idxLyric).toBeLessThan(idxControls)
+      // 使用态（鼠标进入、控件组滑入）：歌词收起
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
+      // 离开超过 1s → 回到闲置态 → 歌词恢复
+      vi.useFakeTimers()
+      try {
+        act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+        act(() => { vi.advanceTimersByTime(1200) })
+      } finally { vi.useRealTimers() }
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(barEl.classList.contains('dimmed')).toBe(true)
+      expect(container.querySelector('.dsh-music-bar-lyric')).toBeTruthy()
+    } finally { lyricFixture = null }
+  })
+
   it('shows only two centered login buttons (QQ/微信登录) when not logged in', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -1407,6 +1463,78 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('QQ音乐')
     // and show the artist name next to the title
     expect(container.textContent).toContain('周杰伦')
+  })
+
+  it('shows the QQ online lyric in the bar (idle state) with translation merged', async () => {
+    // P2：在线 QQ 歌词。QQ 播放走 startQQPlayback（不走 startPlay），歌词从
+    // /dsh-music/qq/lyric 按 songmid 取；有逐句翻译时合并为「原文 ／ 翻译」。
+    const audios = []
+    class LyricAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    qqLyricFixture = {
+      ok: true, hasLyric: true,
+      lrc: [{ t: 0, text: '告白气球' }, { t: 3, text: '亲爱的 爱上你' }],
+      trans: [{ t: 3, text: 'darling I love you' }],
+    }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LyricAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const barEl = container.querySelector('.dsh-music-bar')
+      expect(barEl.classList.contains('dimmed')).toBe(true)
+      // 闲置态 → 歌词显示当前行（currentTime=0 → 第一行，无翻译）
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('告白气球')
+      // 推进到 3.5s → 第二行 + 翻译合并（原文 ／ 翻译）
+      act(() => { audio.currentTime = 3.5; audio.emit('timeupdate') })
+      const lyric2 = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric2.textContent).toContain('亲爱的 爱上你')
+      expect(lyric2.textContent).toContain('darling I love you')
+      // 使用态（悬停）→ 歌词收起（与本地歌词同规格）
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
+    } finally { qqLyricFixture = null }
   })
 
   it('clears the QQ artist from the bar when switching to a local track or novel', async () => {

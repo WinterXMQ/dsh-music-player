@@ -11,7 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileS
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { apply, parseBookStructure, splitBookChunks } from '../lib/index.js'
+import { apply, parseBookStructure, splitBookChunks, parseLrc } from '../lib/index.js'
 
 // ---- tiny fake HTTP req/res (enough for the plugin's routes) ----
 function makeReq({ method = 'GET', url = '/', headers = {}, body = '' }) {
@@ -775,6 +775,109 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     const { chunks } = splitBookChunks(n, [])
     expect(chunks.length).toBe(1)
     expect(chunks[0]).toContain('没有章节标题')
+  })
+})
+
+describe('dsh-music-player parseLrc', () => {
+  it('parses [mm:ss] timestamps with text into sorted lines', () => {
+    const lrc = parseLrc('[00:12.00]第一句\n[00:30.5]第二句\n[01:02]第三句\n')
+    expect(lrc).toEqual([
+      { t: 12, text: '第一句' },
+      { t: 30.5, text: '第二句' },
+      { t: 62, text: '第三句' },
+    ])
+  })
+  it('duplicates a line across multiple timestamps and re-sorts unsorted input', () => {
+    const lrc = parseLrc('[00:20.00][00:10.00]重复句\n')
+    expect(lrc).toEqual([
+      { t: 10, text: '重复句' },
+      { t: 20, text: '重复句' },
+    ])
+  })
+  it('applies [offset:±ms] to all timestamps and skips metadata tags', () => {
+    const lrc = parseLrc('[ti:标题]\n[ar:歌手]\n[offset:-500]\n[00:10.00]歌词\n')
+    expect(lrc).toEqual([{ t: 9.5, text: '歌词' }])
+  })
+  it('strips html-ish tags and drops empty/untimed lines', () => {
+    const lrc = parseLrc('[00:01.00]<i>斜体</i>歌词\n\n没有时间戳的一行\n[00:02.00]\n')
+    expect(lrc).toEqual([
+      { t: 1, text: '斜体歌词' },
+    ])
+  })
+  it('handles three-digit millisecond fractions and empty input', () => {
+    expect(parseLrc('[00:00.500]半秒\n')).toEqual([{ t: 0.5, text: '半秒' }])
+    expect(parseLrc('')).toEqual([])
+  })
+})
+
+describe('dsh-music-player /lyric route', () => {
+  it('serves parsed LRC for a track with a sibling .lrc (case-insensitive fallback)', async () => {
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: { 'song.mp3': 'M', 'Song.LRC': '[00:01.00]第一句\n[00:05.50]第二句\n' },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.hasLrc).toBe(true)
+      expect(body.lrc).toEqual([
+        { t: 1, text: '第一句' },
+        { t: 5.5, text: '第二句' },
+      ])
+    } finally { cleanup() }
+  })
+  it('reports hasLrc:false when no sibling .lrc exists', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(false)
+      expect(body.hasLrc).toBe(false)
+    } finally { cleanup() }
+  })
+  it('forbids unregistered paths (403) and rejects a missing path (400)', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    try {
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric?path=' + encodeURIComponent('/etc/passwd.mp3') }), res1)
+      expect(res1.status).toBe(403)
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric' }), res2)
+      expect(res2.status).toBe(400)
+    } finally { cleanup() }
+  })
+})
+
+describe('dsh-music-player book text route', () => {
+  it('returns the plain text of a chunk from /book/<id>/text?from=n', async () => {
+    const text = '第一章 开始。\n这是正文第一块，内容足够长以便分块。'
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': text } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/text?from=0' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(typeof body.text).toBe('string')
+      expect(body.text.length).toBeGreaterThan(0)
+      expect(body.from).toBe(0)
+      // chunk text must come from the file content
+      expect(text.includes(body.text) || body.text.includes('第一章')).toBe(true)
+    } finally { cleanup() }
+  })
+  it('reports ok:false beyond the last chunk', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'novel.txt': '只有一段。' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/book/b0/text?from=999' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(false)
+    } finally { cleanup() }
   })
 })
 

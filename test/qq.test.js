@@ -34,6 +34,7 @@ vi.mock('../lib/qq.js', () => ({
   getTopLists: vi.fn(),
   getTopListSongs: vi.fn(),
   getNewSongs: vi.fn(),
+  getLyric: vi.fn(),
 }))
 
 import * as QQ from '../lib/qq.js'
@@ -110,6 +111,10 @@ beforeEach(() => {
   vi.mocked(QQ.getTopLists).mockResolvedValue([{ id: '0', name: '巅峰榜', toplists: [{ id: '62', name: '飙升榜', cover: 'https://x.jpg', listenNum: 123 }] }])
   vi.mocked(QQ.getTopListSongs).mockResolvedValue({ id: '62', name: '飙升榜', total: 100, hasMore: true, cover: '', updateTime: '', songs: [{ id: 'm1', songmid: 'm1', title: '飙升歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
   vi.mocked(QQ.getNewSongs).mockResolvedValue({ type: 5, label: '最新', songs: [{ id: 'n1', songmid: 'n1', title: '新歌', artists: ['歌手'], payplay: 0, source: 'qq' }] })
+  vi.mocked(QQ.getLyric).mockResolvedValue({
+    lyric: '[ti:晴天]\n[ar:周杰伦]\n[offset:0]\n[00:00.00]晴天\n[00:02.25]故事的小黄花\n',
+    trans: '[00:00.00]翻译一\n[00:02.25]翻译二\n',
+  })
 })
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -499,6 +504,51 @@ describe('dsh-music-player QQ online routes', () => {
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/qq/top-songs?topId=abc' }), res)
       expect(res.status).toBe(400)
+    } finally { cleanup() }
+  })
+
+  it('returns parsed lyric + translation via /dsh-music/qq/lyric?songmid=', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=0039MnYb0qxYhV' }), res)
+      expect(res.status).toBe(200)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(QQ.getLyric).toHaveBeenCalledWith('0039MnYb0qxYhV', '')
+      expect(data.hasLyric).toBe(true)
+      // 元数据行 [ti:]/[ar:] 被跳过，只保留带时间戳的歌词行
+      expect(data.lrc).toEqual([
+        { t: 0, text: '晴天' },
+        { t: 2.25, text: '故事的小黄花' },
+      ])
+      // 逐句翻译同样解析为 [{t,text}]
+      expect(data.trans).toEqual([
+        { t: 0, text: '翻译一' },
+        { t: 2.25, text: '翻译二' },
+      ])
+    } finally { cleanup() }
+  })
+
+  it('rejects a bad songmid via /dsh-music/qq/lyric', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=' + encodeURIComponent('非法 mid!') }), res)
+      expect(res.status).toBe(400)
+    } finally { cleanup() }
+  })
+
+  it('surfaces a getLyric failure (retcode!=0) as a 502', async () => {
+    vi.mocked(QQ.getLyric).mockRejectedValueOnce(new Error('未获取到歌词（retcode=1101）'))
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=__invalid__' }), res)
+      expect(res.status).toBe(502)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(false)
+      expect(String(data.error)).toContain('1101')
     } finally { cleanup() }
   })
 })
