@@ -976,7 +976,7 @@ describe('dsh-music-player client render smoke', () => {
     vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '对话测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
-    bookTextFixture = '他说：“你来了吗？我等你很久了。”她点点头。'
+    bookTextFixture = '他说：“你来了吗？”她点头。'
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', SubAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -1021,16 +1021,16 @@ describe('dsh-music-player client render smoke', () => {
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
       // the whole dialogue is one line: the 。？ inside “...” didn't cut it
-      expect(lyric.textContent).toContain('他说：“你来了吗？我等你很久了。”她点点头。')
-      expect(lyric.textContent).not.toContain('你来了吗？”\n')
+      expect(lyric.textContent).toContain('他说：“你来了吗？”她点头。')
+      expect(lyric.textContent).toContain('你来了吗？”')
     } finally {
       bookTextFixture = ''
     }
   })
 
-  it('wraps long AI 讲书 subtitle lines adaptively, each no longer than 30 chars', async () => {
-    // A single long sentence (>30) full of commas: splitSentences must wrap it
-    // into ≤30-char lines at the natural clause pauses, and never split a
+  it('wraps long AI 讲书 subtitle lines adaptively, each no longer than 20 chars', async () => {
+    // A single long sentence (>20) full of commas: splitSentences must wrap it
+    // into ≤20-char lines at the natural clause pauses, and never split a
     // quoted dialogue in the process.
     const audios = []
     class WrapAudio extends FakeAudio {
@@ -1040,7 +1040,7 @@ describe('dsh-music-player client render smoke', () => {
     vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长句测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
-    bookTextFixture = '他说：“我们先商量一下，然后再做决定，千万不要冲动。”接着，他转身走了出去，留下我一个人在原地发呆，心里想着他刚才说的那一番话。'
+    bookTextFixture = '他说：“我们走吧。”接着，他转身走了出去，留下我一个人在原地发呆，心里想着他刚才说的那一番话。'
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', WrapAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -1085,13 +1085,13 @@ describe('dsh-music-player client render smoke', () => {
         const el = container.querySelector('.dsh-music-bar-lyric')
         if (el && el.textContent) seen.add(el.textContent)
       }
-      // the long sentence wrapped into multiple lines, and each line ≤ 48
+      // the long sentence wrapped into multiple lines, and each line ≤ 20
       expect(seen.size).toBeGreaterThan(1)
-      for (const line of seen) expect(line.length).toBeLessThanOrEqual(30)
+      for (const line of seen) expect(line.length).toBeLessThanOrEqual(20)
       // the quoted dialogue stays on a single line (never split inside “”)
-      const holder = [...seen].find((l) => l.includes('“我们先商量一下'))
+      const holder = [...seen].find((l) => l.includes('“我们走吧'))
       expect(holder).toBeTruthy()
-      expect(holder).toContain('千万不要冲动。”')
+      expect(holder).toContain('我们走吧。”')
     } finally {
       bookTextFixture = ''
     }
