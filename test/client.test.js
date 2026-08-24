@@ -780,6 +780,51 @@ describe('dsh-music-player client render smoke', () => {
     expect(tocScrollTargets.some((el) => el.textContent.includes('第一章 起'))).toBe(false)
   })
 
+  it('anchors the AI 讲书 volume popup with bottom positioning (like the TOC, not cut off)', async () => {
+    // Regression: the book-mode volume popup is variable-height (AI 声音 select +
+    // 音量滑块), so it must use anchorPopAbove (bottom-anchored + height-capped) —
+    // not anchorAbove (top + translateY(-100%)), which cuts off tall popups at the
+    // viewport top and detaches their bottom edge from the bar.
+    const book = { id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [book] }
+    vi.resetModules()
+    localStorage.clear()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    expect(bookTab).toBeTruthy()
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('测试小说'))
+    expect(bookRow).toBeTruthy()
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl).toBeTruthy()
+    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    // 打开音量弹窗 → 讲书（book）模式
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    expect(volBtn).toBeTruthy()
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const volPop = document.querySelector('.dsh-music-bar-vol-pop.book')
+    expect(volPop).toBeTruthy()
+    // 讲书音量弹窗用 anchorPopAbove：bottom 锚定（jsdom 中 rect 全零走回退分支，
+    // bottom 被设置、top 为空）；真实浏览器则底边贴住按钮上方 6px、高度受限。
+    expect(volPop.style.position).toBe('fixed')
+    expect(volPop.style.bottom).toBeTruthy()
+    expect(volPop.style.top).toBe('')
+    // 弹窗内含 AI 声音选择 + 音量滑块
+    expect(volPop.querySelector('.dsh-music-voice')).toBeTruthy()
+    expect(volPop.querySelector('.dsh-music-vol-slider')).toBeTruthy()
+  })
+
   it('shows the restored chapter immediately after a refresh (no play needed)', async () => {
     // Simulate a saved book playback at chunk 10 (第三章 转), then re-boot so
     // restoreLatest() runs during load — the same path as a page refresh.
