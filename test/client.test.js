@@ -1024,6 +1024,43 @@ describe('dsh-music-player client render smoke', () => {
     expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('main')
   })
 
+  it('QQ 播放列表进入时定位到正在播放的曲目（scrollIntoView 命中 active 行）', async () => {
+    qqLoggedIn = true
+    // jsdom 无 scrollIntoView：spy 它，验证进入播放列表层时会把正在播放的 active 行滚到可见。
+    const scrollSpy = vi.fn()
+    Element.prototype.scrollIntoView = scrollSpy
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 推荐歌单 → 打开「热门推荐」歌单（详情 mock 返回 告白气球 + 七里香 两首）
+    const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const card = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { card.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 播放第二首（七里香）——让 active 行不是列表第一行，才能证明滚动到了它。
+    const second = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('七里香'))
+    act(() => { second.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('七里香')
+    // 播放列表层应显示两首歌，其中正在播放的 七里香 是 active 行
+    const activeRows = [...container.querySelectorAll('.dsh-music-track-row.active')]
+    expect(activeRows.length).toBe(1)
+    expect(activeRows[0].textContent).toContain('七里香')
+    // scrollIntoView 必须被调用在 active 行上（证明进入播放列表层时定位到正在播放位置）
+    const targets = scrollSpy.mock.instances.filter((el) =>
+      el && el.classList && el.classList.contains('dsh-music-track-row') && el.classList.contains('active'))
+    expect(targets.length).toBeGreaterThan(0)
+  })
+
   it('shows a 音乐来源 (QQ音乐) badge on the bar when playing an online track', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
