@@ -278,6 +278,47 @@ describe('dsh-music-player client render smoke', () => {
     expect([...controls.querySelectorAll('.dsh-music-bar-btn')].some((b) => b.title === '播放/暂停')).toBe(true)
   })
 
+  it('dims the whole bar to 50% opacity on mouse-leave (1s delay), full opacity on hover', async () => {
+    // 后台静默播放效果：鼠标移入 → 播放条完全不透明（去 dimmed）；鼠标移出 1s 后 →
+    // 控件组折叠的同时播放条变半透明（加 dimmed）。两者同一状态源（barHover）同步变化。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl).toBeTruthy()
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    // 初始（未悬停）：半透明 dimmed
+    expect(barEl.classList.contains('dimmed')).toBe(true)
+    vi.useFakeTimers()
+    try {
+      // 鼠标移入 → 立即不透明（去 dimmed），控件组随之滑入
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      expect(controls.classList.contains('on')).toBe(true)
+      // 鼠标移出 → 1s 延迟内仍不透明（防误移出）
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      // 延迟内重新进入 → 取消隐藏，保持不透明
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { vi.advanceTimersByTime(1500) })
+      expect(barEl.classList.contains('dimmed')).toBe(false)
+      // 离开超过 1s → 控件组折叠，同时播放条变半透明
+      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(controls.classList.contains('on')).toBe(false)
+      expect(barEl.classList.contains('dimmed')).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps the controls expanded while the mode popup is open (portal hover fix)', async () => {
     // Regression: the mode popup is portaled to body (outside the bar DOM), so moving
     // the mouse onto it fires the bar's mouseleave. The buttons must NOT collapse
