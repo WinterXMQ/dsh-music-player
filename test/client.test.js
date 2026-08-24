@@ -260,6 +260,11 @@ describe('dsh-music-player client render smoke', () => {
     expect(controls).toBeTruthy()
     // 默认隐藏：无 .on，时间仍在
     expect(controls.classList.contains('on')).toBe(false)
+    // 播放条文件名去掉扩展名（本地音乐 a.mp3 -> a）；文件列表里仍保留 a.mp3
+    const barName = container.querySelector('.dsh-music-bar-name')
+    expect(barName).toBeTruthy()
+    expect(barName.textContent).not.toContain('.mp3')
+    expect(barName.textContent).toContain('a')
     expect(container.textContent).toContain('a.mp3')
     // 用假定时器控制 1s 滑出延迟。
     vi.useFakeTimers()
@@ -801,10 +806,18 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { root.render(React.createElement('div', null, bar, panel)) })
     // flush the restore-time async /meta fetch so currentSection arrives
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // the section badge shows the restored chapter without any play interaction
-    const badge = container.querySelector('.dsh-music-bar-section')
-    expect(badge).toBeTruthy()
-    expect(badge.textContent).toContain('第三章 转')
+    // the restored chapter is appended after the book name (QQ-music「歌名 - 歌手」style),
+    // and the trailing '.txt' is stripped from the displayed file name
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('测试小说')
+    expect(nameSpan.textContent).toContain('第三章 转')
+    expect(nameSpan.textContent).not.toContain('测试小说.txt')
+    // no standalone section badge remains inside the bar
+    expect(nameSpan.querySelector('.dsh-music-bar-section')).toBeNull()
+    expect(container.querySelector('.dsh-music-bar-section')).toBeNull()
+    // AI 讲书模式下播放条不显示当前/总时长
+    expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     // the book name is prefixed by a MIC icon (not the music note)
     const nameIcon = container.querySelector('.dsh-music-bar-name .dsh-music-note path')
     expect(nameIcon).toBeTruthy()
