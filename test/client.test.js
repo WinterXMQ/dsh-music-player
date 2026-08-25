@@ -1647,6 +1647,137 @@ describe('dsh-music-player client render smoke', () => {
     bookTextFixture = ''
   })
 
+  it('does NOT leak a restored in-chunk position into the NEXT chunk (resume near chunk end)', async () => {
+    // Regression: resuming a book restores bookRestorePos (in-chunk position). When
+    // that position sat at/near the chunk's END, the pin never released before the
+    // chunk ended, so the stale pos leaked into the NEXT chunk — which got seeked
+    // back to it (jumping each chunk to its end → 卡住/无声音/字幕不动). Advancing
+    // to a new chunk must drop the pin.
+    const audios = []
+    class ResumeLeakAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '续播泄漏测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = [{ type: 'chapter', heading: '第一章 起', fromChunk: 0 }, { type: 'chapter', heading: '第二章 承', fromChunk: 2 }]
+    bookCharOffsets = [0, 100, 200, 300]
+    bookTextFixture = '续播块的文本内容，含若干句子用于字幕。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '续播泄漏测试.txt': { from: 2, base: 400, pos: 30, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ResumeLeakAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('续播泄漏测试'))
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=2')
+
+    // chunk 2 is 30s and the restored pos=30 sits at the very END: the pin never
+    // releases (ct > 31 is impossible), so it holds until the chunk ends.
+    audio.duration = 30
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('play') })
+    audio.currentTime = 30
+    act(() => { audio.emit('timeupdate') })
+    // chunk 2 ends -> auto-advance to chunk 3
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=3')
+
+    // chunk 3 starts fresh — a stale pin would re-seek it to 30 (clamped to end).
+    audio.duration = 30
+    audio.currentTime = 0.1
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('timeupdate') })
+    expect(audio.currentTime).toBeLessThan(1)
+    bookTextFixture = ''
+  })
+
+  it('releases the restore pin when the saved in-chunk position is beyond the chunk (re-synthesized shorter)', async () => {
+    // Regression: resuming into a chunk whose re-synthesized duration is SHORTER
+    // than the saved in-chunk position. Seeking to the saved pos would clamp to the
+    // end and instantly end the chunk (stall loop). The pin must release instead of
+    // keeping the position pinned/unseekable.
+    const audios = []
+    class ShortChunkAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '短块续播测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 100, 200, 300]
+    bookTextFixture = '短块续播。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '短块续播测试.txt': { from: 2, base: 400, pos: 30, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ShortChunkAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const ex = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    ex.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('短块续播测试'))
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=2')
+
+    // chunk duration is only 20s, but saved pos is 30 (beyond duration).
+    audio.duration = 20
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('play') })
+    audio.currentTime = 0.1
+    act(() => { audio.emit('timeupdate') })
+    // Pin must have released (pos beyond duration), so currentTime is NOT forced to 30.
+    expect(audio.currentTime).toBeLessThan(1)
+    bookTextFixture = ''
+  })
+
   it('does NOT append a chapter name or the “-” separator when the novel has no chapters', async () => {
     // A novel with no detectable section structure must show ONLY the book title
     // in the bar — no " - " and no chapter text appended (currentSection stays '').
