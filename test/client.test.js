@@ -2258,6 +2258,132 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('shows a centered success toast when adding a local track to a playlist via ＋', async () => {
+    // 「＋」→ 加入歌单 → 成功：面板窗口内居中显示「添加到XXX成功」，2s 后自动消失
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      if (String(u) === '/dsh-music/playlist/add' && o && o.method === 'POST') {
+        return jsonRes({ ok: true, added: 1, playlist: { id: 'pl-1', name: '通勤', count: 2, tracks: [] } })
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 曲库每行的「＋」按钮
+      const plusBtn = container.querySelector('.dsh-music-track-row .dsh-music-playlist-mini.add')
+      expect(plusBtn).toBeTruthy()
+      act(() => { plusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 弹窗列出歌单（含「通勤」）
+      const popItem = [...document.body.querySelectorAll('.dsh-music-add-pop-item')].find((b) => b.textContent.includes('通勤'))
+      expect(popItem).toBeTruthy()
+      act(() => { popItem.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 成功 toast：面板窗口内居中（.ok），文本=添加到通勤成功
+      const toast = container.querySelector('.dsh-music-panel-toast')
+      expect(toast).toBeTruthy()
+      expect(toast.className).toContain('ok')
+      expect(toast.textContent).toBe('添加到通勤成功')
+      // 2s 后自动消失
+      await act(async () => { await new Promise((r) => setTimeout(r, 2100)) })
+      expect(container.querySelector('.dsh-music-panel-toast')).toBeNull()
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
+  it('shows a centered failure toast and keeps the menu open when adding a local track fails', async () => {
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      if (String(u) === '/dsh-music/playlist/add' && o && o.method === 'POST') {
+        return jsonRes({ ok: false, error: '歌单不存在' })
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const plusBtn = container.querySelector('.dsh-music-track-row .dsh-music-playlist-mini.add')
+      act(() => { plusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const popItem = [...document.body.querySelectorAll('.dsh-music-add-pop-item')].find((b) => b.textContent.includes('通勤'))
+      act(() => { popItem.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const toast = container.querySelector('.dsh-music-panel-toast')
+      expect(toast).toBeTruthy()
+      expect(toast.className).toContain('err')
+      expect(toast.textContent).toBe('添加到通勤失败')
+      // 失败时加入弹窗保留（可换歌单重试）
+      expect([...document.body.querySelectorAll('.dsh-music-add-pop-item')].some((b) => b.textContent.includes('通勤'))).toBe(true)
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
+  it('shows a centered success toast when adding a QQ song to 我的歌单 via ＋', async () => {
+    qqLoggedIn = true
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      if (String(u) === '/dsh-music/qq/playlist-add' && o && o.method === 'POST') {
+        return jsonRes({ ok: true })
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+      act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const input = container.querySelector('.dsh-music-qq-input')
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(input, '晴天')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const searchBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
+      act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const songRow = [...container.querySelectorAll('.dsh-music-track-row')].find((r) => r.textContent.includes('晴天'))
+      const plusBtn = songRow && songRow.querySelector('.dsh-music-playlist-mini.add')
+      expect(plusBtn).toBeTruthy()
+      act(() => { plusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 「我的歌单」自动加载 → 弹窗列出「我的收藏」
+      const popItem = [...document.body.querySelectorAll('.dsh-music-add-pop-item')].find((b) => b.textContent.includes('我的收藏'))
+      expect(popItem).toBeTruthy()
+      act(() => { popItem.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const toast = container.querySelector('.dsh-music-panel-toast')
+      expect(toast).toBeTruthy()
+      expect(toast.className).toContain('ok')
+      expect(toast.textContent).toBe('添加到我的收藏成功')
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
   it('collapses and expands the category chips in 分类歌单', async () => {
     qqLoggedIn = true
     const origFetch = window.fetch
