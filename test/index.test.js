@@ -1359,6 +1359,17 @@ describe('dsh-music-player book structure meta route', () => {
         expect(sec.heading.length).toBeGreaterThan(0)
         prev = sec.fromChunk
       }
+      // 讲书进度条依赖的「逐块累积字符偏移」：长度 = chunk 数 + 1，首项为 0、单调
+      // 不减，末项(全书总字符)与 totalChars 一致，且恒为正。
+      expect(Array.isArray(data.charOffsets)).toBe(true)
+      expect(data.charOffsets).toHaveLength(data.total + 1)
+      expect(data.charOffsets[0]).toBe(0)
+      for (let i = 1; i < data.charOffsets.length; i++) {
+        expect(data.charOffsets[i]).toBeGreaterThanOrEqual(data.charOffsets[i - 1])
+        expect(data.charOffsets[i] - data.charOffsets[i - 1]).toBeGreaterThan(0) // 每块非空
+      }
+      expect(data.totalChars).toBe(data.charOffsets[data.charOffsets.length - 1])
+      expect(data.totalChars).toBeGreaterThan(0)
     } finally { cleanup() }
   })
 })

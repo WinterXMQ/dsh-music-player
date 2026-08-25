@@ -68,6 +68,10 @@ let bookMetaSections = []
 // test hook: per-book sections keyed by book id, so different books can report
 // different structures (e.g. one with chapters, one without) in the same test.
 let bookMetaById = {}
+// test hook: per-book、逐块累积字符偏移（charOffsets）用于「已读字符/全书字符」的
+// 讲书进度条测试；bookCharOffsetsById 可按 book id 覆盖 bookCharOffsets。
+let bookCharOffsets = []
+let bookCharOffsetsById = {}
 // test hook: /dsh-music/book/*/text?from= response chunk text (for the AI 讲书
 // subtitle-line splitting test).
 let bookTextFixture = ''
@@ -187,7 +191,11 @@ async function fetchStub(url, opts) {
   if (u.includes('/dsh-music/book/') && u.endsWith('/meta')) {
     const id = u.split('/')[3] || 'b1'
     const sections = bookMetaById[id] !== undefined ? bookMetaById[id] : bookMetaSections
-    return jsonRes({ id, name: '测试小说', total: 25, title: '测试小说', author: '佚名', sections })
+    const offsets = bookCharOffsetsById[id] !== undefined ? bookCharOffsetsById[id] : bookCharOffsets
+    return jsonRes({
+      id, name: '测试小说', total: 25, title: '测试小说', author: '佚名', sections,
+      charOffsets: offsets, totalChars: offsets.length > 0 ? offsets[offsets.length - 1] : 0,
+    })
   }
   if (u.includes('/dsh-music/book/') && u.includes('/text?from=')) {
     const from = parseInt(new URL('http://x' + u).searchParams.get('from') || '0', 10) || 0
@@ -263,6 +271,8 @@ beforeEach(async () => {
   lastFilesUrl = null
   bookMetaSections = []
   bookMetaById = {}
+  bookCharOffsets = []
+  bookCharOffsetsById = {}
   qqLoggedIn = false
   favCalls = []
   delPlaylistCalls = []
@@ -1299,6 +1309,93 @@ describe('dsh-music-player client render smoke', () => {
     expect(active.textContent).toContain('第三章 转')
   })
 
+  it('shows the restored book progress right after a refresh (before any play)', async () => {
+    // Regression: after a refresh the book is restored PAUSED, so onTime never
+    // fires and bookProgress would stay 0. The restore path must back-fill the
+    // fill width from charOffsets once the meta loads — even before the user taps ▶.
+    // Chunks: 10 / 20 / 30 chars, total 60. Restored at chunk index 2 → progress to
+    // chunk start = offsets[2]/total = 30/60 = 50%.
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '进度恢复测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 10, 30, 60]
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '进度恢复测试.txt': { from: 2, base: 400, pos: 0, total: 25, ts: 999999999 },
+    }) }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-time async /meta fetch so charOffsets land + bookProgress fills
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // the progress fill is computed from the restored chunk, NOT stuck at 0
+    const fill = container.querySelector('.dsh-music-bar-progress-fill')
+    expect(fill).toBeTruthy()
+    expect(parseFloat(fill.style.width)).toBeCloseTo(50, 1)
+  })
+
+  it('loads the current chunk subtitle when resuming a restored book (no gap until next chunk)', async () => {
+    // Regression: after a refresh the book is restored PAUSED. Resuming via ▶ went
+    // straight to audio.play() WITHOUT loadBookSubtitle, so the current chunk's
+    // subtitleLines stayed empty — the lyric only appeared at the NEXT chunk. The
+    // resume path must fetch & show the current chunk's subtitle immediately.
+    const audios = []
+    class ResumeAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '恢复字幕测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '这是恢复后应立刻出现的字幕。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({ '恢复字幕测试.txt': { from: 0, base: 0, pos: 0, total: 1, ts: 999999999 } }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ResumeAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-time async /meta fetch
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // BEFORE resuming there is no subtitle (paused restore never loads it)
+    // Resume: click ▶ → togglePlay loads the chunk and must load the subtitle.
+    act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // flush the loadBookSubtitle /text fetch
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // give the media a duration + a position so updateLyric can pick line 0
+    audio.duration = 10
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    const lyric = container.querySelector('.dsh-music-bar-lyric')
+    expect(lyric).toBeTruthy()
+    expect(lyric.textContent).toContain('这是恢复后')
+    bookTextFixture = ''
+  })
+
   it('does NOT append a chapter name or the “-” separator when the novel has no chapters', async () => {
     // A novel with no detectable section structure must show ONLY the book title
     // in the bar — no " - " and no chapter text appended (currentSection stays '').
@@ -1705,6 +1802,144 @@ describe('dsh-music-player client render smoke', () => {
     } finally {
       bookTextFixture = ''
     }
+  })
+
+  // Boot a fresh client instance whose FakeAudio can emit events, mount the bar +
+  // panel, open the AI 讲书 tab, and click the matching book row. Returns the
+  // mounted container and the created <audio> so a test can drive
+  // currentTime/duration and read the rendered progress fill + percent readout.
+  async function mountProgressBook({ bookName, charOffsets, text }) {
+    const audios = []
+    class ProgressAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: bookName, url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = charOffsets
+    bookTextFixture = text
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ProgressAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    expect(bookTab).toBeTruthy()
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes(bookName))
+    expect(bookRow).toBeTruthy()
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // flush the async /meta (charOffsets) + /text (subtitle) fetches
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    return { container, audio }
+  }
+
+  it('fills the AI 讲书 progress bar by read-char / total-char (not chunk time ratio)', async () => {
+    // Two chunks: chunk0 = 10 chars, chunk1 = 20 chars, total 30. 块内按时间占比插值
+    // 到已读字符数，再除以全书字符——而不是用 position/duration（那会切块回退）。
+    const { container, audio } = await mountProgressBook({ bookName: '进度测试.txt', charOffsets: [0, 10, 30], text: '甲' })
+    audio.duration = 10
+    audio.currentTime = 5 // chunk0 中点
+    act(() => { audio.emit('timeupdate') })
+    // consumed = offsets[0] + (10-0) * (5/10) = 5 ; progress = 5/30 ≈ 16.7%
+    const fill = container.querySelector('.dsh-music-bar-progress-fill')
+    expect(fill).toBeTruthy()
+    expect(parseFloat(fill.style.width)).toBeCloseTo(16.67, 1)
+    // 前进到 chunk0 末端 → consumed = 10 → 33.3%
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    expect(parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)).toBeCloseTo(33.33, 1)
+    bookTextFixture = ''
+  })
+
+  it('keeps AI 讲书 progress monotonic across a chunk boundary (never steps back)', async () => {
+    const { container, audio } = await mountProgressBook({ bookName: '跨块进度测试.txt', charOffsets: [0, 10, 30], text: '甲' })
+    // chunk0 播完 → progress = offsets[1]/total = 10/30 = 33.3%
+    audio.duration = 10
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    const p0 = parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(p0).toBeCloseTo(33.33, 1)
+    // chunk0 结束 → 自动切到 chunk1（bookFromRef = 1）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 新块从块内位置 0 开始：consumed = offsets[1] + 0 = 10 → 33.3%，与上一块末端连续
+    audio.duration = 20
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    const p1 = parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(p1).toBeCloseTo(33.33, 1)      // 不是回退到更低的百分比
+    expect(p1).toBeGreaterThanOrEqual(p0 - 0.001) // 单调：只增不减
+    // 且随 chunk1 播放继续爬升（块内插值）
+    audio.currentTime = 10
+    act(() => { audio.emit('timeupdate') })
+    const p2 = parseFloat(container.querySelector('.dsh-music-bar-progress-fill').style.width)
+    expect(p2).toBeGreaterThan(p1)
+    expect(p2).toBeCloseTo((10 + 20 * 0.5) / 30 * 100, 1) // 50%
+    bookTextFixture = ''
+  })
+
+  it('tolerates a nearby comma just past the hard-cut boundary (line stays complete)', async () => {
+    // 22 个连续汉字后接逗号、窗口内无任何停顿标点：硬切本会在第 20 字处断。容忍算法把
+    // 行尾挪到边界后不远处（≤ SUBTITLE_TOLERANCE 字）的逗号之后，使这一行以完整分句结束。
+    const fixture = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥，'
+    const { container, audio } = await mountProgressBook({ bookName: '容忍标点测试.txt', charOffsets: [0, 40], text: fixture })
+    audio.duration = 10
+    const seen = new Set()
+    for (let t = 0; t <= 9.9; t += 0.05) {
+      audio.currentTime = t
+      act(() => { audio.emit('timeupdate') })
+      const el = container.querySelector('.dsh-music-bar-lyric')
+      if (el && el.textContent) seen.add(el.textContent)
+    }
+    expect(seen.size).toBe(1)                 // 没有额外再拆出一行
+    const line = [...seen][0]
+    expect(subContentLen(line)).toBe(22)      // 容忍后略超 20 字
+    expect(line.endsWith('，')).toBe(true)     // 且落在完整分句上，不是裸切
+    bookTextFixture = ''
+  })
+
+  it('swallows a tiny chunk tail when the block is about to end (no stub line)', async () => {
+    // 23 个连续汉字、无任何标点：硬切会拆成「20 字 + 3 字残行」。容忍算法在块尾只余
+    // ≤ SUBTITLE_TOLERANCE 字时把尾巴并入本行，避免末尾出现一个极短残行。
+    const fixture = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥走'
+    const { container, audio } = await mountProgressBook({ bookName: '容忍块尾测试.txt', charOffsets: [0, 40], text: fixture })
+    audio.duration = 10
+    const seen = new Set()
+    for (let t = 0; t <= 9.9; t += 0.05) {
+      audio.currentTime = t
+      act(() => { audio.emit('timeupdate') })
+      const el = container.querySelector('.dsh-music-bar-lyric')
+      if (el && el.textContent) seen.add(el.textContent)
+    }
+    expect(seen.size).toBe(1)                 // 不再拆出第 2 个极短残行
+    const line = [...seen][0]
+    expect(line).toBe(fixture)                // 整块吞进一行
+    expect(subContentLen(line)).toBe(23)
+    bookTextFixture = ''
   })
 
   it('double-clicking a track plays it without pausing or showing an autoplay-block error', async () => {
