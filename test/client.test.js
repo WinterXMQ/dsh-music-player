@@ -86,9 +86,27 @@ let qqFetchLog = []
 let lyricFixture = null
 // test hook: /dsh-music/qq/lyric?songmid= response (QQ lyric + optional trans).
 let qqLyricFixture = null
+// ---- Host prefs mirror (the client now persists EVERYTHING here; no localStorage) ----
+// `prefsServer` is the test's view of the Host's music-player-prefs.json.
+// `prefsPosts` records every POST /dsh-music/prefs body for assertions.
+// `prefsPostOpts` records the fetch options (e.g. keepalive) of each POST.
+let prefsServer = {}
+let prefsPosts = []
+let prefsPostOpts = []
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
+  if (u === '/dsh-music/prefs') {
+    if (o && o.method === 'POST') {
+      const body = JSON.parse(o.body || '{}')
+      prefsPosts.push(body)
+      prefsPostOpts.push({ keepalive: o.keepalive, bodyLen: (o.body || '').length })
+      Object.assign(prefsServer, body.prefs || {})
+      for (const k of (body.remove || [])) delete prefsServer[k]
+      return jsonRes({ ok: true, prefs: prefsServer })
+    }
+    return jsonRes({ ok: true, prefs: prefsServer })
+  }
   if (String(u).startsWith('/dsh-music/qq/')) qqFetchLog.push(u.split('?')[0])
   if (u.startsWith('/dsh-music/lyric?path=')) {
     return jsonRes(lyricFixture || { ok: false, hasLrc: false })
@@ -232,7 +250,9 @@ function baseManifest() {
 
 beforeEach(async () => {
   vi.resetModules()
-  localStorage.clear()
+  prefsServer = {}
+  prefsPosts = []
+  prefsPostOpts = []
   lastFilesUrl = null
   bookMetaSections = []
   bookMetaById = {}
@@ -252,6 +272,140 @@ describe('dsh-music-player client render smoke', () => {
     expect(html).toContain('DSH音乐播放器')
     // idle state (no track) shows the music note icon
     expect(html).toContain('M12 3v10.55')
+  })
+
+  it('restores volume/mode/voice from the Host prefs snapshot and mirrors changes back (dsh-desktop fix)', async () => {
+    // dsh-desktop: the Host snapshot is the only source of truth (no browser
+    // storage at all). Seed the Host prefs and re-boot so the client restores
+    // volume/mode/voice from it, then verify changes flush back to the Host.
+    prefsServer = { 'dsh-music-volume': '0.42', 'dsh-music-mode': 'shuffle', 'dsh-music-voice': '碧瑶' }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar)) })
+
+    // mode restored from Host ('乱序播放')
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('乱序播放'))
+    expect(modeBtn).toBeTruthy()
+
+    // volume restored from Host (42%)
+    const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
+    expect(volBtn).toBeTruthy()
+    act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const volSlider = container.querySelector('.dsh-music-vol-slider')
+    expect(volSlider).toBeTruthy()
+    expect(volSlider.title).toBe('音量 42%')
+
+    // changing the mode pushes the new value to the Host via POST /dsh-music/prefs
+    const curModeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('乱序播放'))
+    act(() => { curModeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const single = [...document.querySelectorAll('.dsh-music-mode-item')].find((b) => b.title.includes('单曲循环'))
+    expect(single).toBeTruthy()
+    act(() => { single.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // the client flushes on an ~800ms debounce; wait for it to fire
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const modePost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-mode'])
+    expect(modePost).toBeTruthy()
+    expect(modePost.prefs['dsh-music-mode']).toBe('single')
+    // the Host's persisted snapshot reflects the new mode too
+    expect(prefsServer['dsh-music-mode']).toBe('single')
+  })
+
+  it('restores the last played track and QQ search history from the Host prefs after restart', async () => {
+    // Real-world scenario: the Host file has a saved playback entry + QQ search
+    // history. A fresh page load must restore both (bar shows the track, the
+    // QQ search box shows the keyword) with NO browser storage.
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: '周杰伦 - Mine Mine.wav', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-qq-history': JSON.stringify(['刀郎']),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // restorePlayback resolves the saved id '0' against the current library, so
+    // the bar shows that track (baseManifest track 0 = "a.mp3" -> "a"), paused.
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('a')
+    expect(container.querySelector('button[title="播放/暂停"]')).toBeTruthy()
+    // open the panel -> QQ tab -> focus the search box -> history appears
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+    act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
+    expect(histItems.some((b) => b.textContent === '刀郎')).toBe(true)
+  })
+
+  it('restores prefs even when the Host prefs fetch is slow (panel mounts before snapshot)', async () => {
+    // Timing regression: in the real browser the /dsh-music/prefs fetch resolves
+    // after the React tree mounts, so the QQ panel's mount-time history read sees
+    // an empty snapshot. The prefsReady effect must re-apply it once it arrives.
+    prefsServer = { 'dsh-music-qq-history': JSON.stringify(['七里香']) }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    // delay ONLY the /dsh-music/prefs GET to simulate network latency
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url) === '/dsh-music/prefs' && (!opts || !opts.method || opts.method === 'GET')) {
+        return new Promise((resolve) => setTimeout(() => resolve(jsonRes({ ok: true, prefs: prefsServer })), 120))
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    // render the panel immediately (before the 120ms prefs fetch resolves)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // open panel -> QQ -> search, focus input: history must be empty for now
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+    // wait for the slow prefs fetch + prefsReady re-apply
+    await act(async () => { await new Promise((r) => setTimeout(r, 160)) })
+    act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
+    expect(histItems.some((b) => b.textContent === '七里香')).toBe(true)
   })
 
   it('stays in the work state (no dim / controls expanded) when there is no playback content', async () => {
@@ -282,7 +436,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', LocalAudio)
@@ -522,7 +676,7 @@ describe('dsh-music-player client render smoke', () => {
       fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) },
       fillStyle: '',
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest()
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     let rafCb = null
     vi.stubGlobal('Audio', PlayAudio)
@@ -804,7 +958,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(parseInt(panelEl.style.width, 10)).toBe(560)   // 460 + 100
     expect(parseInt(panelEl.style.height, 10)).toBeGreaterThanOrEqual(200) // clamped min
     expect(panelEl.style.maxHeight).toBe('none') // explicit height wins over 72vh
-    const saved = JSON.parse(localStorage.getItem('dsh-music-panel-pos'))
+    // the resize is mirrored to the Host prefs (flushed on the ~800ms debounce)
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const saved = JSON.parse(prefsServer['dsh-music-panel-pos'])
     expect(saved).toMatchObject({ w: 560 })
     expect(typeof saved.h).toBe('number')
     // shrink back below the min clamps to 320
@@ -825,7 +981,6 @@ describe('dsh-music-player client render smoke', () => {
     ]
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [book] }
     vi.resetModules()
-    localStorage.clear()
     lastFilesUrl = null
     await bootClient()
     // Serve the book's /meta (section structure); everything else falls back.
@@ -901,7 +1056,6 @@ describe('dsh-music-player client render smoke', () => {
     const book = { id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [book] }
     vi.resetModules()
-    localStorage.clear()
     lastFilesUrl = null
     await bootClient()
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
@@ -950,9 +1104,9 @@ describe('dsh-music-player client render smoke', () => {
     ]
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = sections
-    localStorage.setItem('dsh-music-books-playback', JSON.stringify({
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
       '测试小说.txt': { from: 10, base: 300, pos: 3, total: 25, ts: 999999999 },
-    }))
+    }) }
     vi.resetModules()
     lastFilesUrl = null
     await bootClient()
@@ -994,9 +1148,9 @@ describe('dsh-music-player client render smoke', () => {
     // in the bar — no " - " and no chapter text appended (currentSection stays '').
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '无章节小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = [] // no structure -> parser returns empty sections
-    localStorage.setItem('dsh-music-books-playback', JSON.stringify({
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
       '无章节小说.txt': { from: 3, base: 100, pos: 1, total: 25, ts: 999999999 },
-    }))
+    }) }
     vi.resetModules()
     lastFilesUrl = null
     await bootClient()
@@ -1073,7 +1227,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '对话测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
     bookTextFixture = '他说：“你来了吗？”她点头。'
@@ -1136,7 +1290,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长句测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
     bookTextFixture = '他说：“我们走吧。”接着，他转身走了出去，留下我一个人在原地发呆，心里想着他刚才说的那一番话。'
@@ -1205,7 +1359,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长对话测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
     bookTextFixture = '他说：“我们先商量一下，然后再做决定，千万不要冲动。”'
@@ -1271,7 +1425,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '长标点测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
     bookTextFixture = '他说：“句子一。句子二？句子三。句子四。句子五。句子六。句子七。”'
@@ -1340,7 +1494,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null
+    vi.resetModules(); registered = []; lastFilesUrl = null
     manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '加权测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
     bookMetaSections = []
     bookTextFixture = '甲，乙，丙，丁，戊，己，庚，辛，壬，癸，子，丑，寅，卯，辰，巳，午，未，申，酉，戌，亥。'
@@ -1423,7 +1577,6 @@ describe('dsh-music-player client render smoke', () => {
     // Re-boot with the pending-play Audio stub (fresh module = fresh instances).
     vi.resetModules()
     registered = []
-    localStorage.clear()
     lastFilesUrl = null
     manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
@@ -1688,17 +1841,62 @@ describe('dsh-music-player client render smoke', () => {
     const searchBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
     act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    expect(JSON.parse(localStorage.getItem('dsh-music-qq-history'))).toContain('周杰伦')
+    // the keyword is persisted to the Host (flushed on the ~800ms debounce)
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-qq-history'])).toContain('周杰伦')
     // focus the input again → history dropdown appears with the keyword
     act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
     expect(histItems.some((b) => b.textContent === '周杰伦')).toBe(true)
+    // regression: the dropdown must be portaled + fixed (it would be clipped by
+    // the panel's overflow:hidden otherwise — jsdom doesn't lay out CSS, so the
+    // fixed positioning is what guarantees it escapes the clip in a real browser)
+    const histPop = document.querySelector('.dsh-music-qq-hist')
+    expect(histPop).toBeTruthy()
+    expect(histPop.style.position).toBe('fixed')
+    expect(histPop.style.top).toBeTruthy()
+    expect(histPop.style.width).toBeTruthy()
     // clicking a history item fills the box and runs a new search
     const item = histItems.find((b) => b.textContent === '周杰伦')
     act(() => { item.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('晴天')
+    // regression: clicking the portaled dropdown must NOT close the panel (the
+    // panel's outside-click handler treats portaled popups as "inside")
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    expect(panelEl.style.display).not.toBe('none')
+  })
+
+  it('does NOT close the panel when clicking a portaled popup (history/TOC/mode/volume)', async () => {
+    // Regression: popups are portaled to <body> (to escape the panel's
+    // overflow:hidden clip), so a click on them is technically outside the
+    // panel DOM. The panel's outside-click handler must treat these as "inside".
+    qqLoggedIn = true
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl.style.display).not.toBe('none')
+    // baseline: a mousedown truly outside (document.body) closes the panel
+    act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    expect(panelEl.style.display).toBe('none')
+    // reopen, then mousedown inside portaled popups appended to <body> must NOT close it
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const overlays = ['dsh-music-qq-hist', 'dsh-music-toc', 'dsh-music-mode-pop', 'dsh-music-bar-vol-pop', 'dsh-music-picker-overlay', 'dsh-music-add-pop']
+    for (const cls of overlays) {
+      const pop = document.createElement('div')
+      pop.className = cls
+      document.body.appendChild(pop)
+      act(() => { pop.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+      expect(panelEl.style.display).not.toBe('none')
+      pop.remove()
+    }
   })
 
   it('browses QQ playlists (recommend -> detail -> category)', async () => {
@@ -1975,12 +2173,15 @@ describe('dsh-music-player client render smoke', () => {
     const back = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '← 返回')
     expect(back).toBeTruthy()
     expect(container.textContent).toContain('暂无歌曲')
-    expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('playlist')
+    // the panel layer is persisted to the Host (flushed on the ~800ms debounce)
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-qq-ui']).layer).toBe('playlist')
     // 返回主 UI
     act(() => { back.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('推荐歌单')
-    expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('main')
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-qq-ui']).layer).toBe('main')
   })
 
   it('QQ 播放列表进入时定位到正在播放的曲目（scrollIntoView 命中 active 行）', async () => {
@@ -2148,7 +2349,6 @@ describe('dsh-music-player client render smoke', () => {
     // currentQuality，播放条显示品质芯片；与在线 QQ 的「QQ音乐 · 无损」互不叠加。
     manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损' }] }
     vi.resetModules()
-    localStorage.clear()
     lastFilesUrl = null
     await bootClient()
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
@@ -2176,7 +2376,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     qqLyricFixture = {
       ok: true, hasLyric: true,
       lrc: [{ t: 0, text: '告白气球' }, { t: 3, text: '亲爱的 爱上你' }],
@@ -2249,7 +2449,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', QAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2314,7 +2514,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', QAudio2)
     vi.stubGlobal('fetch', fetchStub)
@@ -2464,14 +2664,72 @@ describe('dsh-music-player client render smoke', () => {
     const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
     act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // savePlayback must persist the online QQ state (previously skipped)
-    const saved = JSON.parse(localStorage.getItem('dsh-music-playback'))
+    // savePlayback must persist the online QQ state to the Host (flushed on debounce)
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const saved = JSON.parse(prefsServer['dsh-music-playback'])
     expect(saved.kind).toBe('qq')
     expect(saved.id).toBe('qq:789')
     expect(Array.isArray(saved.queue)).toBe(true)
     expect(saved.queue.length).toBe(2)
     // and the scope is remembered as qq (so refresh opens the online view)
-    expect(JSON.parse(localStorage.getItem('dsh-music-scope')).kind).toBe('qq')
+    expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('qq')
+  })
+
+  it('flushes a large QQ queue playback WITHOUT keepalive (64KiB browser limit regression)', async () => {
+    // Regression: the playback save embeds the whole QQ queue; a long playlist
+    // (800 songs) makes the POST body exceed the browser's 64KiB keepalive cap,
+    // which used to make fetch throw and silently drop the playback write.
+    // Large payloads must go out with keepalive=false.
+    const bigSongs = Array.from({ length: 800 }, (_, i) => ({
+      id: 'mid' + i, songmid: 'mid' + i, title: '测试歌曲 ' + i + ' 号', artists: ['测试歌手'], payplay: 0, source: 'qq',
+    }))
+    // seed the playlist-layer restore so the panel opens the big playlist
+    prefsServer = { 'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: 'big', plName: '大队列歌单' }) }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; prefsPostOpts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url).startsWith('/dsh-music/qq/playlist/big')) {
+        return jsonRes({ ok: true, playlist: { id: 'big', name: '大队列歌单', creator: '作者', trackCount: 800, source: 'qq', songs: bigSongs } })
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    // restoreUi loaded the big playlist layer -> click the first song
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('测试歌曲 0 号'))
+    expect(song).toBeTruthy()
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // flush debounce
+
+    const saved = JSON.parse(prefsServer['dsh-music-playback'])
+    expect(saved.kind).toBe('qq')
+    expect(saved.queue.length).toBe(800)
+    // the large body must NOT use keepalive (browser would throw >64KiB)
+    const playbackPost = prefsPostOpts.find((o) => o.bodyLen > 60 * 1024)
+    expect(playbackPost).toBeTruthy()
+    expect(playbackPost.keepalive).toBe(false)
   })
 
   it('loads 我的歌单 in its own sub-tab when logged in', async () => {
@@ -2667,7 +2925,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', DispatchAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2722,7 +2980,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', ErrAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2777,7 +3035,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', ResetAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2840,7 +3098,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', SoloAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2903,7 +3161,7 @@ describe('dsh-music-player client render smoke', () => {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', AllBadAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -2967,7 +3225,7 @@ describe('dsh-music-player client render smoke', () => {
     class DispatchAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
     }
-    vi.resetModules(); registered = []; localStorage.clear(); lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     vi.stubGlobal('Audio', DispatchAudio)
     vi.stubGlobal('fetch', fetchStub)
@@ -3059,7 +3317,10 @@ describe('dsh-music-player client render smoke', () => {
   it('lands on the main UI after QR login even if a playlist layer was persisted', async () => {
     // Regression: after login the panel used to restore the previously-persisted
     // playlist layer instead of showing the main UI. Login success must reset to main.
-    localStorage.setItem('dsh-music-qq-ui', JSON.stringify({ layer: 'playlist', plId: '', plName: '' }))
+    // The persisted layer now lives in the Host prefs; seed it before boot.
+    prefsServer = { 'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: '', plName: '' }) }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
     const baseFetch = globalThis.fetch
     const fetcher = vi.fn((url, opts) => {
       const u = String(url)
@@ -3090,7 +3351,11 @@ describe('dsh-music-player client render smoke', () => {
       // should be on the MAIN UI now, not the playlist layer
       expect(container.textContent).toContain('推荐歌单') // a main-UI sub-tab
       expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(false) // not the playlist layer
-      expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('main')
+      // login success reset the persisted layer to 'main'; let the debounced
+      // flush (scheduled before fake timers were enabled) complete in real time
+      vi.useRealTimers()
+      await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+      expect(JSON.parse(prefsServer['dsh-music-qq-ui']).layer).toBe('main')
     } finally {
       vi.useRealTimers()
       vi.unstubAllGlobals()
@@ -3099,11 +3364,10 @@ describe('dsh-music-player client render smoke', () => {
 
   it('preserves the QQ playlist layer when switching tabs within a session', async () => {
     // Regression: QQOnlinePanel used to unmount on tab switch; on remount it restored
-    // the persisted 'playlist' layer from localStorage, so switching away and back
-    // yanked the user around. With the panel kept mounted (CSS-hidden), layer is
-    // component state that survives tab switches: entering the playlist layer and
-    // switching away then back must KEEP the user in that layer.
-    localStorage.clear()
+    // the persisted 'playlist' layer, so switching away and back yanked the user
+    // around. With the panel kept mounted (CSS-hidden), layer is component state
+    // that survives tab switches: entering the playlist layer and switching away
+    // then back must KEEP the user in that layer.
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -3115,11 +3379,12 @@ describe('dsh-music-player client render smoke', () => {
     const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
     act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // enter the playlist layer once -> persisted as 'playlist'
+    // enter the playlist layer once -> persisted as 'playlist' (flushed on debounce)
     const enterPl = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
     act(() => { enterPl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    expect(JSON.parse(localStorage.getItem('dsh-music-qq-ui')).layer).toBe('playlist')
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-qq-ui']).layer).toBe('playlist')
     // switch to 本地音乐 tab (QQOnlinePanel stays mounted, just hidden)
     const musicTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
     act(() => { musicTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -3144,7 +3409,6 @@ describe('dsh-music-player client render smoke', () => {
     }
     vi.resetModules()
     registered = []
-    localStorage.clear()
     lastFilesUrl = null
     manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }

@@ -284,6 +284,88 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('persists playback prefs to the Host via /dsh-music/prefs', async () => {
+    const { home, handler, cleanup } = boot()
+    try {
+      // fresh boot -> empty snapshot
+      const res0 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/prefs' }), res0)
+      expect(JSON.parse(res0.body)).toEqual({ ok: true, prefs: {} })
+
+      // POST merges known string values
+      const res1 = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: { 'dsh-music-volume': '0.65', 'dsh-music-mode': 'shuffle', 'dsh-music-voice': '碧瑶' } }) }),
+        res1,
+      )
+      const d1 = JSON.parse(res1.body)
+      expect(d1.ok).toBe(true)
+      expect(d1.prefs['dsh-music-volume']).toBe('0.65')
+      expect(d1.prefs['dsh-music-mode']).toBe('shuffle')
+      expect(d1.prefs['dsh-music-voice']).toBe('碧瑶')
+
+      // the state is written to disk under DSH_HOME (survives restarts)
+      const prefsFile = join(home, '.dsh', 'music-player-prefs.json')
+      expect(existsSync(prefsFile)).toBe(true)
+      const onDisk = JSON.parse(readFileSync(prefsFile, 'utf8'))
+      expect(onDisk.prefs['dsh-music-mode']).toBe('shuffle')
+
+      // GET reflects the persisted snapshot
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/prefs' }), res2)
+      const d2 = JSON.parse(res2.body)
+      expect(d2.prefs['dsh-music-volume']).toBe('0.65')
+
+      // remove clears a key without touching the others
+      const res3 = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ remove: ['dsh-music-mode'] }) }),
+        res3,
+      )
+      const d3 = JSON.parse(res3.body)
+      expect('dsh-music-mode' in d3.prefs).toBe(false)
+      expect(d3.prefs['dsh-music-volume']).toBe('0.65')
+    } finally { cleanup() }
+  })
+
+  it('sanitizes prefs: drops unknown keys, invalid volume/mode and oversize values', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const big = 'x'.repeat(300 * 1024)
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: { 'evil-key': '1', 'dsh-music-volume': '1.5', 'dsh-music-mode': 'bogus', 'dsh-music-playback': big } }) }),
+        res,
+      )
+      const d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      expect('evil-key' in d.prefs).toBe(false)        // not in the allowlist
+      expect(d.prefs['dsh-music-volume']).toBe('1')     // clamped to 0..1
+      expect('dsh-music-mode' in d.prefs).toBe(false)   // invalid mode dropped
+      expect('dsh-music-playback' in d.prefs).toBe(false) // oversize dropped
+    } finally { cleanup() }
+  })
+
+  it('accepts QQ-related prefs (qq-fav / qq-history / qq-ui) through the allowlist', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-qq-fav': JSON.stringify({ ids: [1, 2], mids: ['a', 'b'] }),
+          'dsh-music-qq-history': JSON.stringify(['周杰伦', '七里香']),
+          'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: 'x', plName: '歌单' }),
+        } }) }),
+        res,
+      )
+      const d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      expect(JSON.parse(d.prefs['dsh-music-qq-fav']).mids).toEqual(['a', 'b'])
+      expect(JSON.parse(d.prefs['dsh-music-qq-history'])).toContain('周杰伦')
+      expect(JSON.parse(d.prefs['dsh-music-qq-ui']).layer).toBe('playlist')
+    } finally { cleanup() }
+  })
+
   it('lists .txt novels as books in the manifest', async () => {
     // Books share the default root with music until a separate book root is set.
     const { handler, musicDir, cleanup } = boot({
