@@ -3238,6 +3238,47 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).not.toContain('暂无歌曲。')
   })
 
+  it('refreshes the local library list via the 刷新 button (manual re-scan)', async () => {
+    // 面板「刷新」按钮：点击后调用 /dsh-music/rescan，用返回的新列表替换曲库（无需重选目录）。
+    const origFetch = window.fetch
+    window.fetch = (u, o) => {
+      if (String(u) === '/dsh-music/rescan' && o && o.method === 'POST') {
+        return jsonRes({
+          ok: true, root: '/music', bookRoot: '/books', count: 2,
+          tracks: [
+            { id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' },
+            { id: '1', name: 'b.mp3', url: '/dsh-music/1', size: 12, ext: 'mp3', path: '/music/b.mp3' },
+          ],
+          books: [], playlists: manifest.playlists, voices: [],
+        })
+      }
+      return origFetch(u, o)
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 初始只有 a.mp3
+      expect(container.textContent).toContain('a.mp3')
+      expect(container.textContent).not.toContain('b.mp3')
+      // 点「刷新」→ 重扫后显示新增的 b.mp3
+      const refreshBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '刷新')
+      expect(refreshBtn).toBeTruthy()
+      act(() => { refreshBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('b.mp3')
+      // 播放范围仍为曲库、tab 未被跳走（rescan 只刷列表，不触发 restorePlayback）
+      expect(container.querySelector('.dsh-music-tab.active').textContent).toBe('本地音乐')
+    } finally {
+      window.fetch = origFetch
+    }
+  })
+
   it('loads 我的歌单 in its own sub-tab when logged in', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()

@@ -533,6 +533,30 @@ describe('dsh-music-player host routes', () => {
       expect(JSON.parse(res.body).ok).toBe(false)
     } finally { cleanup() }
   })
+
+  it('re-scans the current directory via /dsh-music/rescan (manual refresh)', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'a.mp3': 'AAA' } })
+    try {
+      // 初始扫描 1 首
+      const res0 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res0)
+      expect(JSON.parse(res0.body).count).toBe(1)
+
+      // 新增文件后，manifest 仍返回旧的内存扫描结果（不动态刷新）
+      writeFileSync(join(musicDir, 'new.mp3'), 'NEWBYTES')
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res1)
+      expect(JSON.parse(res1.body).count).toBe(1)
+
+      // 手动 rescan 后能看到新文件
+      const res2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/rescan' }), res2)
+      const data = JSON.parse(res2.body)
+      expect(data.ok).toBe(true)
+      expect(data.count).toBe(2)
+      expect(data.tracks.map((t) => t.name).sort()).toEqual(['a.mp3', 'new.mp3'])
+    } finally { cleanup() }
+  })
 })
 
 describe('dsh-music-player /dir route', () => {
