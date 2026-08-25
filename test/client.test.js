@@ -1092,8 +1092,10 @@ describe('dsh-music-player client render smoke', () => {
     const handle = container.querySelector('.dsh-music-resize')
     expect(handle).toBeTruthy()
     const panelEl = container.querySelector('.dsh-music-panel')
-    // default: no inline geometry (CSS 380px / auto height)
+    // default: no inline geometry (CSS width / auto height), but a comfortable
+    // auto-size min-height so a fresh (empty-list) panel does not open too short
     expect(panelEl.style.width).toBe('')
+    expect(panelEl.style.minHeight).toBe('45vh')
     const pointer = (type, x, y) => {
       const ev = new Event(type, { bubbles: true })
       ev.clientX = x; ev.clientY = y; ev.button = 0; ev.pointerId = 1
@@ -1105,6 +1107,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(parseInt(panelEl.style.width, 10)).toBe(560)   // 460 + 100
     expect(parseInt(panelEl.style.height, 10)).toBeGreaterThanOrEqual(200) // clamped min
     expect(panelEl.style.maxHeight).toBe('none') // explicit height wins over 72vh
+    expect(panelEl.style.minHeight).toBe('') // auto-size min-height released once fixed
     // the resize is mirrored to the Host prefs (flushed on the ~800ms debounce)
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
     const saved = JSON.parse(prefsServer['dsh-music-panel-pos'])
