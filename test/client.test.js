@@ -86,7 +86,8 @@ let qqFetchLog = []
 let lyricFixture = null
 // test hook: /dsh-music/qq/lyric?songmid= response (QQ lyric + optional trans).
 let qqLyricFixture = null
-// ---- Host prefs mirror (the client now persists EVERYTHING here; no localStorage) ----
+// ---- Host prefs mirror (the client's authoritative store is the Host; old
+// localStorage is only a read-backup + upgrade migration source) ----
 // `prefsServer` is the test's view of the Host's music-player-prefs.json.
 // `prefsPosts` records every POST /dsh-music/prefs body for assertions.
 // `prefsPostOpts` records the fetch options (e.g. keepalive) of each POST.
@@ -253,6 +254,7 @@ beforeEach(async () => {
   prefsServer = {}
   prefsPosts = []
   prefsPostOpts = []
+  localStorage.clear() // isolated legacy browser-store between tests
   lastFilesUrl = null
   bookMetaSections = []
   bookMetaById = {}
@@ -406,6 +408,151 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
     expect(histItems.some((b) => b.textContent === '七里香')).toBe(true)
+  })
+
+  it('falls back to the old browser localStorage copy when the Host has no record (upgrade path)', async () => {
+    // Pre-0.7 builds kept prefs under the SAME key names in localStorage. On
+    // upgrade the Host file is empty, so the client must read the legacy browser
+    // copy (mode + QQ history) and restore it — then migrate it into the Host.
+    localStorage.setItem('dsh-music-mode', 'single')
+    localStorage.setItem('dsh-music-qq-history', JSON.stringify(['刀郎']))
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // mode restored from the legacy browser copy ('单曲循环')
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('单曲循环'))
+    expect(modeBtn).toBeTruthy()
+
+    // QQ history restored from the legacy browser copy
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
+    expect(histItems.some((b) => b.textContent === '刀郎')).toBe(true)
+
+    // the legacy copy was migrated into the Host snapshot (read via loadPref)
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // flush fires on an ~800ms debounce
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const migrated = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-mode'])
+    expect(migrated).toBeTruthy()
+    expect(migrated.prefs['dsh-music-mode']).toBe('single')
+    expect(prefsServer['dsh-music-qq-history']).toBe(JSON.stringify(['刀郎']))
+    // once adopted by the Host, the browser copies are removed — localStorage
+    // is a one-way upgrade source and never keeps the migrated data.
+    expect(localStorage.getItem('dsh-music-mode')).toBeNull()
+    expect(localStorage.getItem('dsh-music-qq-history')).toBeNull()
+  })
+
+  it('never writes new data to the browser store (Host-only persistence)', async () => {
+    // Regression guard for the "no browser storage" guarantee: a savePref (here
+    // triggered by changing the play mode) must NOT appear in localStorage —
+    // the Host is the only place new data is stored.
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // change mode: 顺序播放 -> 单曲循环 (default is 'order')
+    const curModeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('顺序播放'))
+    act(() => { curModeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const single = [...document.querySelectorAll('.dsh-music-mode-item')].find((b) => b.title.includes('单曲循环'))
+    act(() => { single.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+
+    // flushed to the Host…
+    expect(prefsPosts.some((p) => p.prefs && p.prefs['dsh-music-mode'] === 'single')).toBe(true)
+    expect(prefsServer['dsh-music-mode']).toBe('single')
+    // …but NOT mirrored into localStorage
+    expect(localStorage.getItem('dsh-music-mode')).toBeNull()
+  })
+
+  it('keeps the Host value authoritative over a conflicting legacy localStorage copy', async () => {
+    // If both the Host and the old browser store have a value, the Host wins.
+    prefsServer = { 'dsh-music-mode': 'order', 'dsh-music-volume': '0.5' }
+    localStorage.setItem('dsh-music-mode', 'single') // stale legacy conflict
+    localStorage.setItem('dsh-music-volume', '0.9')
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // Host's 'order' (顺序播放) wins, not legacy 'single' (单曲循环)
+    const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('顺序播放'))
+    expect(modeBtn).toBeTruthy()
+    const singleBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title.startsWith('单曲循环'))
+    expect(singleBtn).toBeFalsy()
+    // the stale browser duplicates are dropped once the Host snapshot has them
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(localStorage.getItem('dsh-music-mode')).toBeNull()
+    expect(localStorage.getItem('dsh-music-volume')).toBeNull()
+  })
+
+  it('migrates the legacy single-book key into the per-book map on upgrade', async () => {
+    // Pre-0.2.1 stored ONE book's progress in dsh-music-book-playback. On upgrade
+    // it must fold into dsh-music-books-playback so the novel keeps its place.
+    localStorage.setItem('dsh-music-book-playback', JSON.stringify({
+      id: 'book:b1', name: '凡人修仙传.txt', from: 5, base: 100, pos: 42, total: 25, ts: 111,
+    }))
+    const audios = []
+    class LocalAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    manifest = { ...baseManifest(), books: [{ id: 'book:b1', name: '凡人修仙传.txt', url: '/dsh-music/book/b1/text?from=0', sections: [], total: 25, ext: 'txt' }] }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', LocalAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    // wait for the legacy migration (runs after loadServerPrefs resolves)
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // the per-book map now holds the legacy entry and flushes to the Host
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const map = JSON.parse(prefsServer['dsh-music-books-playback'] || '{}')
+    expect(map['凡人修仙传.txt']).toBeTruthy()
+    expect(map['凡人修仙传.txt'].pos).toBe(42)
+    expect(map['凡人修仙传.txt'].ts).toBe(111)
+    // the legacy single-book key is gone from the browser store
+    expect(localStorage.getItem('dsh-music-book-playback')).toBeNull()
   })
 
   it('stays in the work state (no dim / controls expanded) when there is no playback content', async () => {
