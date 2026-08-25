@@ -3128,6 +3128,116 @@ describe('dsh-music-player client render smoke', () => {
     expect(playbackPost.keepalive).toBe(false)
   })
 
+  it('retries the restored QQ playlist when the first request returns empty songs (refresh-empty bug)', async () => {
+    // Bug: 刷新后恢复歌单层时，QQ 歌单详情接口首次请求常返回空 songlist（冷缓存），
+    // restoreUi 只发一次请求且无加载态/重试，导致「刷新后播放列表显示为空」；
+    // 返回重进（openPlaylist 第二次请求）才取到完整列表。恢复路径应像 openPlaylist
+    // 一样显示加载中并对空结果/失败自动重试。
+    const retrySongs = [
+      { id: 's1', songmid: 's1', title: '重试歌一', artists: ['歌手A'], payplay: 0, source: 'qq' },
+      { id: 's2', songmid: 's2', title: '重试歌二', artists: ['歌手A'], payplay: 0, source: 'qq' },
+    ]
+    prefsServer = { 'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: 'retrypl', plName: '测试歌单' }) }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    let plCalls = 0
+    vi.stubGlobal('fetch', (url, opts) => {
+      if (String(url).startsWith('/dsh-music/qq/playlist/retrypl')) {
+        plCalls++
+        const empty = plCalls === 1
+        return jsonRes({ ok: true, playlist: { id: 'retrypl', name: '测试歌单', creator: '作者', trackCount: 2, source: 'qq', songs: empty ? [] : retrySongs } })
+      }
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 50))
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 给恢复请求 + 重试留出时间（当前代码只有 1 次请求；修复后最多重试几次）
+    await new Promise((r) => setTimeout(r, 2200))
+    act(() => {})
+    // 恢复的歌单层应自动重试并把完整列表显示出来（而不是停在「暂无歌曲」）
+    expect(plCalls).toBeGreaterThan(1)
+    const songRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('重试歌一'))
+    expect(songRow).toBeTruthy()
+    expect(container.textContent).not.toContain('暂无歌曲。')
+  })
+
+  it('restores the 在线播放列表 (queue) layer with the saved queue after refresh (queue-restore race)', async () => {
+    // Bug: 刷新后 restoreUi 恢复「在线播放列表」（plId=''，来自 openQueue 保存）时，
+    // prefsReady 置位早于 restorePlayback 把 qqQueue 灌好（loadTracks 先 set prefsReady、
+    // 再等 manifest、最后 restoreLatest→灌队列），读取的是空快照 → 直接显示「暂无歌曲」；
+    // 返回重进（openQueue）重新读取已就绪的队列才正常。
+    prefsServer = {
+      'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: '', plName: '' }),
+      'dsh-music-playback': JSON.stringify({
+        kind: 'qq', id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
+        position: 10, duration: 240,
+        queue: [
+          { id: '789', songmid: '789', title: '告白气球', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+          { id: '790', songmid: '790', title: '七里香', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+        ],
+        source: '在线', ts: 999999999,
+      }),
+    }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', (url, opts) => {
+      // 延迟 manifest：让 prefsReady 先到（触发 restoreUi 读空队列），restorePlayback
+      // 灌 qqQueue 后到，精确复现竞态。
+      if (String(url) === '/dsh-music/manifest') return new Promise((resolve) => setTimeout(() => resolve(jsonRes(manifest)), 300))
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 等 manifest 延迟（300ms）过后 restorePlayback 已把队列灌进 store
+    await new Promise((r) => setTimeout(r, 600))
+    act(() => {})
+    // 恢复的「在线播放列表」应显示保存的队列歌曲，而不是「暂无歌曲」
+    const songRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    expect(songRow).toBeTruthy()
+    expect(container.textContent).not.toContain('暂无歌曲。')
+  })
+
   it('loads 我的歌单 in its own sub-tab when logged in', async () => {
     qqLoggedIn = true
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
