@@ -1148,6 +1148,154 @@ describe('dsh-music-player /lyric route', () => {
   })
 })
 
+describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底)', () => {
+  // 按 URL 分发的 fetch stub：QQ 搜索 / QQ 歌词 / LRCLIB 搜索，并记录调用次数。
+  function makeStub({ qqSearch = [], qqLyric = null, lrclib = [] }) {
+    const calls = { qqSearch: 0, qqLyric: 0, lrclib: 0 }
+    const fn = async (url) => {
+      const u = String(url)
+      if (u.includes('c.y.qq.com/soso/fcgi-bin/client_search_cp')) {
+        calls.qqSearch++
+        return { ok: true, status: 200, json: async () => ({ code: 0, data: { song: { totalnum: qqSearch.length, list: qqSearch } } }) }
+      }
+      if (u.includes('c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new')) {
+        calls.qqLyric++
+        return { ok: true, status: 200, json: async () => (qqLyric || { retcode: -1, lyric: '' }) }
+      }
+      if (u.includes('lrclib.net/api/search')) {
+        calls.lrclib++
+        return { ok: true, status: 200, json: async () => lrclib }
+      }
+      throw new Error('unexpected stub url: ' + u)
+    }
+    fn.calls = calls
+    return fn
+  }
+  const qqSong = (songmid, title, artist, interval) => ({ songmid, songname: title, singer: [{ name: artist }], interval, payplay: 0 })
+  const lrclibRec = (id, trackName, artistName, duration, syncedLyrics) => ({ id, trackName, artistName, duration, instrumental: false, syncedLyrics })
+
+  it('returns 400 for a missing path and 403 for an unregistered path', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    try {
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online' }), res1)
+      expect(res1.status).toBe(400)
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent('/etc/passwd.mp3') }), res2)
+      expect(res2.status).toBe(403)
+      // 未登记路径不得触发任何在线请求
+      expect(res2.status).toBe(403)
+    } finally { cleanup() }
+  })
+
+  it('serves a local sibling .lrc with source local when present (no online fetch)', async () => {
+    const { handler, musicDir, cleanup } = boot({
+      musicFiles: { 'song.mp3': 'M', 'song.lrc': '[00:01.00]第一句\n[00:05.50]第二句\n' },
+    })
+    let fetches = 0
+    vi.stubGlobal('fetch', async () => { fetches++; throw new Error('should not fetch') })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.hasLyric).toBe(true)
+      expect(body.source).toBe('local')
+      expect(body.lrc).toEqual([
+        { t: 1, text: '第一句' },
+        { t: 5.5, text: '第二句' },
+      ])
+      expect(fetches).toBe(0)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('falls back to QQ online lyric (source qq) when no local .lrc exists', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    const stub = makeStub({
+      qqSearch: [qqSong('S1', '七里香', '周杰伦', 297)],
+      qqLyric: { retcode: 0, lyric: '[00:01.00]窗外的麻雀\n[00:05.00]雨下整夜\n', trans: '[00:01.00]Sparrow\n' },
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) + '&title=%E4%B8%83%E9%87%8C%E9%A6%99&artist=%E5%91%A8%E6%9D%B0%E4%BC%A6&duration=297' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.hasLyric).toBe(true)
+      expect(body.source).toBe('qq')
+      expect(body.matched.songmid).toBe('S1')
+      expect(body.lrc[0]).toEqual({ t: 1, text: '窗外的麻雀' })
+      expect(body.trans).toEqual([{ t: 1, text: 'Sparrow' }])
+      expect(stub.calls.qqSearch).toBe(1)
+      expect(stub.calls.qqLyric).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('falls through to LRCLIB (source lrclib) when QQ has no matching song', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    const stub = makeStub({
+      qqSearch: [qqSong('S9', '稻香', '周杰伦', 240)], // 标题不匹配 → QQ 分数不足
+      lrclib: [lrclibRec(7, '七里香', '周杰伦', 297, '[00:01.00]窗外的麻雀\n[00:05.00]雨下整夜\n')],
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) + '&title=%E4%B8%83%E9%87%8C%E9%A6%99&artist=%E5%91%A8%E6%9D%B0%E4%BC%A6' }), res)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.hasLyric).toBe(true)
+      expect(body.source).toBe('lrclib')
+      expect(body.matched.id).toBe(7)
+      expect(body.lrc.length).toBe(2)
+      expect(stub.calls.qqSearch).toBe(1) // QQ 搜到但分数不足 → 继续走 LRCLIB
+      expect(stub.calls.lrclib).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('caches a positive hit by path so a repeat request performs no new fetch', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    const stub = makeStub({
+      qqSearch: [qqSong('S1', '晴天', '周杰伦', 269)],
+      qqLyric: { retcode: 0, lyric: '[00:01.00]故事的小黄花\n', trans: '' },
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const url = '/dsh-music/lyric/online?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) + '&title=%E6%99%B4%E5%A4%A9&artist=%E5%91%A8%E6%9D%B0%E4%BC%A6'
+      const res1 = makeRes()
+      await handler(makeReq({ url }), res1)
+      expect(JSON.parse(res1.body).source).toBe('qq')
+      const res2 = makeRes()
+      await handler(makeReq({ url }), res2)
+      const body2 = JSON.parse(res2.body)
+      expect(body2.source).toBe('qq')
+      expect(body2.lrc).toEqual([{ t: 1, text: '故事的小黄花' }])
+      expect(stub.calls.qqSearch).toBe(1) // 第二次命中缓存，不再出网
+      expect(stub.calls.qqLyric).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('caches a negative result (no lyric) and returns hasLyric:false on repeat', async () => {
+    const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
+    const stub = makeStub({ qqSearch: [], lrclib: [] })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const url = '/dsh-music/lyric/online?path=' + encodeURIComponent(join(musicDir, 'song.mp3')) + '&title=no-such-song'
+      const res1 = makeRes()
+      await handler(makeReq({ url }), res1)
+      const body1 = JSON.parse(res1.body)
+      expect(body1.ok).toBe(true)
+      expect(body1.hasLyric).toBe(false)
+      const res2 = makeRes()
+      await handler(makeReq({ url }), res2)
+      expect(JSON.parse(res2.body).hasLyric).toBe(false)
+      expect(stub.calls.qqSearch).toBe(1) // 空结果也缓存，避免反复打接口
+      expect(stub.calls.lrclib).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+})
+
 describe('dsh-music-player book text route', () => {
   it('returns the plain text of a chunk from /book/<id>/text?from=n', async () => {
     const text = '第一章 开始。\n这是正文第一块，内容足够长以便分块。'

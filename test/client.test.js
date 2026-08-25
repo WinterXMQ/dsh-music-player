@@ -84,6 +84,8 @@ let delPlaylistFail = false
 let qqFetchLog = []
 // test hook: /dsh-music/lyric?path= response (parsed LRC or {ok:false}).
 let lyricFixture = null
+// test hook: /dsh-music/lyric/online?path= response (本地无 .lrc → 在线兜底取词).
+let lyricOnlineFixture = null
 // test hook: /dsh-music/qq/lyric?songmid= response (QQ lyric + optional trans).
 let qqLyricFixture = null
 // ---- Host prefs mirror (the client's authoritative store is the Host; old
@@ -111,6 +113,9 @@ async function fetchStub(url, opts) {
   if (String(u).startsWith('/dsh-music/qq/')) qqFetchLog.push(u.split('?')[0])
   if (u.startsWith('/dsh-music/lyric?path=')) {
     return jsonRes(lyricFixture || { ok: false, hasLrc: false })
+  }
+  if (u.startsWith('/dsh-music/lyric/online?path=')) {
+    return jsonRes(lyricOnlineFixture || { ok: true, hasLyric: false })
   }
   if (u.startsWith('/dsh-music/qq/lyric?songmid=')) {
     return jsonRes(qqLyricFixture || { ok: false, error: 'no lyric' })
@@ -263,6 +268,7 @@ beforeEach(async () => {
   delPlaylistCalls = []
   delPlaylistFail = false
   qqFetchLog = []
+  lyricOnlineFixture = null
   manifest = baseManifest()
   await bootClient()
 })
@@ -1837,6 +1843,33 @@ describe('dsh-music-player client render smoke', () => {
       expect(barEl.classList.contains('dimmed')).toBe(true)
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeTruthy()
     } finally { lyricFixture = null }
+  })
+
+  it('falls back to the online lyric when a local track has no .lrc (no source badge)', async () => {
+    // 本地无同名 .lrc（/lyric 返回 hasLrc:false）→ 客户端自动请求 /dsh-music/lyric/online
+    // （Host 走 QQ → LRCLIB 兜底）；取到词后直接显示歌词，不显示歌词来源标识。
+    lyricOnlineFixture = {
+      ok: true, hasLyric: true, source: 'qq',
+      matched: { title: '七里香', artist: '周杰伦', songmid: 'S1', score: 90 },
+      lrc: [{ t: 0, text: '窗外的麻雀' }, { t: 5, text: '雨下整夜' }],
+    }
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('窗外的麻雀')
+      // 不显示来源标识（QQ / LRCLIB 小标已移除）
+      expect(container.querySelector('.dsh-music-bar-lyric-src')).toBeNull()
+    } finally { lyricOnlineFixture = null }
   })
 
   it('shows only two centered login buttons (QQ/微信登录) when not logged in', async () => {
