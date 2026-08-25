@@ -3590,6 +3590,144 @@ describe('dsh-music-player client render smoke', () => {
     expect(audio.paused).toBe(false)
   })
 
+  it('starts a DIFFERENT track from 0 after refresh via the music_play intent (not the old position)', async () => {
+    // Regression: after a refresh the player restores the last track PAUSED at its
+    // saved position (restoredMusicPos). Switching to a different track via the
+    // music_play intent used to leave restoredMusicPos set, so the new track was
+    // seeked back to the PREVIOUS song's progress ("换歌从旧进度开始"). The intent
+    // play path must drop the restore pin and reset the readout.
+    const audios = []
+    class IntentAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    let intent = null
+    let intentPoll = null
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      if (String(url) === '/dsh-music/intent') return jsonRes(intent)
+      return baseFetch(url, opts)
+    })
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+    }
+    manifest = {
+      ...baseManifest(),
+      tracks: [
+        { id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' },
+        { id: '1', name: 'b.mp3', url: '/dsh-music/1', size: 20, ext: 'mp3', path: '/music/b.mp3' },
+      ],
+      count: 2,
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', IntentAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', (cb) => { intentPoll = cb; return 1 })
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // after refresh restore: track 0 is current, paused at 0:42
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan.textContent).toContain('a')
+
+    // Host delivers a music_play intent for a DIFFERENT track (id '1').
+    expect(intentPoll).toBeTruthy()
+    intent = { action: 'play', id: '1', name: 'b.mp3' }
+    await act(async () => { await intentPoll() })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(audio.src).toContain('/dsh-music/1')
+
+    // The new track plays from 0 — simulate a real browser 'play' + timeupdate.
+    act(() => { audio.emit('play') })
+    audio.currentTime = 0.05
+    audio.duration = 100
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('timeupdate') })
+    // MUST NOT be re-seeked back to the old 42.
+    expect(audio.currentTime).toBeLessThan(1)
+  })
+
+  it('starts a different QQ track from 0 after refresh (not the restored local track position)', async () => {
+    // Regression: after a refresh a LOCAL track is restored PAUSED at 42
+    // (restoredMusicPos set). Switching to an online QQ song used to reach
+    // startQQPlayback WITHOUT clearing the pin, so the QQ stream was seeked back
+    // to 42. startQQPlayback must drop the restore pin too.
+    const audios = []
+    class QAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+    }
+    manifest = baseManifest()
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // after refresh restore: local track 0 current, paused at 42
+    expect(container.querySelector('.dsh-music-bar-name').textContent).toContain('a')
+
+    // switch to the QQ panel and play an online song
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('/dsh-music/qq/play/789')
+
+    // simulate a real browser 'play' + timeupdate — must start from ~0, not be seeked to 42
+    act(() => { audio.emit('play') })
+    audio.currentTime = 0.05
+    audio.duration = 240
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('timeupdate') })
+    expect(audio.currentTime).toBeLessThan(1)
+  })
+
   it('flushes a large QQ queue playback WITHOUT keepalive (64KiB browser limit regression)', async () => {
     // Regression: the playback save embeds the whole QQ queue; a long playlist
     // (800 songs) makes the POST body exceed the browser's 64KiB keepalive cap,
