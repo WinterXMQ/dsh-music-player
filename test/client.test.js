@@ -2825,6 +2825,126 @@ describe('dsh-music-player client render smoke', () => {
     expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('qq')
   })
 
+  it('persists the online QQ track position so a restart resumes mid-song', async () => {
+    qqLoggedIn = true
+    const audios = []
+    class QAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+    act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+    act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const audio = audios[0]
+    expect(audio.src).toContain('/dsh-music/qq/play/789')
+    // 播到 1:00（全曲 4:00）时暂停：暂停会立即 savePlayback，位置必须被持久化
+    audio.currentTime = 60
+    audio.duration = 240
+    act(() => { audio.emit('pause') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // flush debounce
+    const saved = JSON.parse(prefsServer['dsh-music-playback'])
+    expect(saved.kind).toBe('qq')
+    expect(saved.id).toBe('qq:789')
+    expect(saved.position).toBe(60)
+    expect(saved.duration).toBe(240)
+    expect(Array.isArray(saved.queue)).toBe(true)
+  })
+
+  it('restarts a restored online QQ track from its saved mid-song position', async () => {
+    // 模拟重启：Host prefs 里躺着一条「播到 1:00」的 QQ 播放记录。新会话必须恢复
+    // 同一曲目 + 队列，播放条显示 1:00 / 4:00（暂停态），点 ▶ 后把流 seek 到 60。
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({
+        kind: 'qq', id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
+        position: 60, duration: 240,
+        queue: [
+          { id: '789', songmid: '789', title: '告白气球', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+          { id: '790', songmid: '790', title: '七里香', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+        ],
+        source: '在线', ts: 999999999,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'qq' }),
+    }
+    qqLoggedIn = true
+    const audios = []
+    class QAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // restorePlayback ran during loadTracks: bar shows the QQ track paused at 1:00 / 4:00
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('告白气球')
+    // 播放条处于闲置（半透明）态时不显示时长；mouseover 激活后显示恢复的位置。
+    const barEl = container.querySelector('.dsh-music-bar')
+    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const timeSpan = container.querySelector('.dsh-music-bar-time')
+    expect(timeSpan).toBeTruthy()
+    expect(timeSpan.textContent).toBe('1:00 / 4:00')
+    // click play -> togglePlay reloads the online stream URL and seeks to the saved spot
+    const playBtn = [...container.querySelectorAll('.dsh-music-bar-btn')].find((b) => b.title === '播放/暂停')
+    expect(playBtn).toBeTruthy()
+    act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const audio = audios[0]
+    expect(audio.src).toContain('/dsh-music/qq/play/789')
+    expect(audio.currentTime).toBeGreaterThanOrEqual(59.5) // 从 1:00 续播而非从头
+    expect(audio.paused).toBe(false)
+  })
+
   it('flushes a large QQ queue playback WITHOUT keepalive (64KiB browser limit regression)', async () => {
     // Regression: the playback save embeds the whole QQ queue; a long playlist
     // (800 songs) makes the POST body exceed the browser's 64KiB keepalive cap,
