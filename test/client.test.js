@@ -887,6 +887,174 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('drives the bars from the live captureStream+AnalyserNode spectrum when available', async () => {
+    // Real-time path: when the <audio> exposes captureStream() (a read-only tap) and an
+    // AudioContext provides a MediaStreamSource + AnalyserNode, drawViz must read
+    // getByteFrequencyData every frame (not the offline FFT envelope). Here the offline
+    // envelope XHR never delivers, so if the bars still move the live analyser path is
+    // doing the work. The tap must NOT reroute audio (createMediaElementSource mutes the
+    // player), so the analyser feeds off a MediaStreamSource, not a MediaElementSource.
+    let freqCalls = 0
+    let ctxSampleRate = 48000
+    class FakeStream { getAudioTracks() { return [{ kind: 'audio' }] } }
+    class LiveAudio extends FakeAudio {
+      play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+      captureStream() { return new FakeStream() }
+    }
+    class FakeAnalyser {
+      constructor() { this.fftSize = 2048; this.smoothingTimeConstant = 0.7; this.frequencyBinCount = 1024 }
+      connect() {}
+      getByteFrequencyData(arr) {
+        freqCalls++
+        // A single strong low-frequency tone (bin ~2) lands only in the first log
+        // band => that bar should be much taller than the rest, proving the bars
+        // came from the analyser (not the offline envelope, which never delivers).
+        for (let i = 0; i < arr.length; i++) arr[i] = i < 3 ? 230 : 4
+      }
+    }
+    class LiveCtx {
+      constructor() { this.state = 'running'; this.sampleRate = ctxSampleRate; this.destination = {} }
+      resume() { this.state = 'running'; return Promise.resolve() }
+      close() { this.state = 'closed' }
+      createMediaStreamSource() { return { connect: () => {} } }
+      createAnalyser() { return new FakeAnalyser() }
+    }
+    // Offline envelope XHR never calls onload => trackEnv stays null => the live
+    // analyser is the ONLY source of band data.
+    class HungXHR { open() {} send() {} }
+    const rects = []
+    const fakeCtx = {
+      clearRect: () => {},
+      fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) },
+      fillStyle: '',
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    let rafCb = null
+    vi.stubGlobal('Audio', LiveAudio)
+    vi.stubGlobal('AudioContext', LiveCtx)
+    vi.stubGlobal('XMLHttpRequest', HungXHR)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    const origGetCtx = HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.getContext = () => fakeCtx
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const canvas = container.querySelector('.dsh-music-viz')
+      expect(canvas).toBeTruthy()
+      const bottom = canvas.height - 1
+      rects.length = 0
+      act(() => { rafCb() })
+      // The live analyser was read (offline envelope never delivered data).
+      expect(freqCalls).toBeGreaterThan(0)
+      const bars = rects.filter((r) => r.y + r.h === bottom)
+      expect(bars.length).toBe(8)
+      // Low-frequency bar is clearly taller than the high-frequency ones.
+      expect(bars[0].h).toBeGreaterThan(bars[1].h * 3)
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetCtx
+    }
+  })
+
+  it('falls back to the offline FFT envelope when the live tap yields no audio track (getTopURL)', async () => {
+    // This browser's media pipeline won't let a Web Audio source/tap read the proxied
+    // stream (an internal "getTopURL" TypeError), so captureStream returns a MediaStream
+    // with NO audio track. setupLiveViz must not fail hard — it leaves the live analyser
+    // unset, and the offline FFT envelope drives the bars (audio is never touched).
+    let freqCalls = 0
+    let tapAttempted = false
+    // Stream that carries no audio track (the getTopURL case in this environment).
+    class EmptyStream { getAudioTracks() { return [] } }
+    class LiveAudio extends FakeAudio {
+      play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+      captureStream() { tapAttempted = true; return new EmptyStream() }
+    }
+    class FakeAnalyser {
+      constructor() { this.fftSize = 2048; this.smoothingTimeConstant = 0.3; this.frequencyBinCount = 1024 }
+      getByteFrequencyData(arr) { freqCalls++; for (let i = 0; i < arr.length; i++) arr[i] = 200 }
+    }
+    // AudioContext with a MediaStreamSource + AnalyserNode (but the stream has no track,
+    // so setupLiveViz bails before using them) plus decodeAudioData for the offline env.
+    class FallbackCtx {
+      constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
+      resume() { this.state = 'running'; return Promise.resolve() }
+      close() { this.state = 'closed' }
+      createMediaStreamSource() { return { connect: () => {} } }
+      createAnalyser() { return new FakeAnalyser() }
+      decodeAudioData() {
+        const sr = 8000; const ch = new Float32Array(sr)
+        for (let i = 0; i < sr; i++) ch[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / sr)
+        return Promise.resolve({ sampleRate: sr, duration: 1, numberOfChannels: 1, getChannelData: () => ch })
+      }
+    }
+    class FakeXHR { constructor() { this.response = new ArrayBuffer(1) } open() {} send() { if (typeof this.onload === 'function') this.onload() } }
+    const rects = []
+    const fakeCtx = { clearRect: () => {}, fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) }, fillStyle: '' }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    let rafCb = null
+    vi.stubGlobal('Audio', LiveAudio)
+    vi.stubGlobal('AudioContext', FallbackCtx)
+    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    const origGetCtx = HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.getContext = () => fakeCtx
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const canvas = container.querySelector('.dsh-music-viz')
+      expect(canvas).toBeTruthy()
+      rects.length = 0
+      freqCalls = 0
+      act(() => { rafCb() })
+      // The tap WAS attempted (captureStream called) but yielded no audio track, so
+      // getByteFrequencyData should NOT be read — the offline envelope drives the bars.
+      expect(tapAttempted).toBe(true)
+      expect(freqCalls).toBe(0)
+      const bottom = canvas.height - 1
+      const bars = rects.filter((r) => r.y + r.h === bottom)
+      expect(bars.length).toBe(8)
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetCtx
+    }
+  })
+
   it('does NOT close the portaled volume/mode popups when clicking inside them', async () => {
     // Regression: the volume/mode popups are portaled to body (outside the bar DOM),
     // so the old outside-click check (button container only) closed them on ANY click
