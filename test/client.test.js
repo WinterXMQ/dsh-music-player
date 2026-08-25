@@ -807,7 +807,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(controls.classList.contains('on')).toBe(false)
   })
 
-  it('draws a real precomputed FFT spectrum (8 bars) on the 46px canvas from the decoded track', async () => {
+  it('draws a real precomputed FFT spectrum (12 bars) on the 60px canvas from the decoded track', async () => {
     // The spectrum is computed offline (real FFT per 50ms window) during decodeAudioData
     // and drawn as 8 log-spaced bars following currentTime. It must work WITHOUT touching
     // the Web Audio output graph — the AnalyserNode routing approach broke this environment's
@@ -869,17 +869,17 @@ describe('dsh-music-player client render smoke', () => {
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // playing -> the 46px viz canvas is mounted
+      // playing -> the 60px viz canvas is mounted
       const canvas = container.querySelector('.dsh-music-viz')
       expect(canvas).toBeTruthy()
-      expect(canvas.width).toBe(46)
+      expect(canvas.width).toBe(60)
       // the decode populated the per-window FFT bands; a rAF tick draws 8 bars
       // (plus optional 2px peak caps at the top — count only the bottom-anchored bars)
       rects.length = 0
       act(() => { rafCb() })
       const bottom = canvas.height - 1
       const bars = rects.filter((r) => r.y + r.h === bottom)
-      expect(bars.length).toBe(8)
+      expect(bars.length).toBe(12)
       expect(bars.every((r) => r.h >= 2)).toBe(true)
       expect(fakeCtx.fillStyle).toBe('#2f9e6e')
     } finally {
@@ -906,10 +906,11 @@ describe('dsh-music-player client render smoke', () => {
       connect() {}
       getByteFrequencyData(arr) {
         freqCalls++
-        // A single strong low-frequency tone (bin ~2) lands only in the first log
-        // band => that bar should be much taller than the rest, proving the bars
-        // came from the analyser (not the offline envelope, which never delivers).
-        for (let i = 0; i < arr.length; i++) arr[i] = i < 3 ? 230 : 4
+        // A single strong low-frequency tone (bin 1) lands only in the first log band =>
+        // that bar should be much taller than the rest, proving the bars came from the
+        // analyser (not the offline envelope, which never delivers). Only bin 1 is loud so it
+        // does not overrun the next band's boundary under the 12-band log spacing.
+        for (let i = 0; i < arr.length; i++) arr[i] = i === 1 ? 230 : 4
       }
     }
     class LiveCtx {
@@ -965,10 +966,92 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { rafCb() })
       // The live analyser was read (offline envelope never delivered data).
       expect(freqCalls).toBeGreaterThan(0)
+      // Dedupe on x to count the real bars (a bottom-anchored bar and its 3px trailing peak
+      // cap would otherwise both satisfy the bottom-line filter).
       const bars = rects.filter((r) => r.y + r.h === bottom)
-      expect(bars.length).toBe(8)
-      // Low-frequency bar is clearly taller than the high-frequency ones.
-      expect(bars[0].h).toBeGreaterThan(bars[1].h * 3)
+      expect(new Set(bars.map((r) => r.x)).size).toBe(12)
+      // The low-frequency bar is still clearly taller than the high-frequency ones (the fixed
+      // frequency weighting flattens but does not invert the spectrum).
+      expect(bars[0].h).toBeGreaterThan(bars[1].h * 2)
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetCtx
+    }
+  })
+
+  it('keeps the live bars low during a quiet passage (no per-band auto-gain inflation)', async () => {
+    // Regression: per-band auto-gain normalized each band to its OWN peak, so an absolutely
+    // quiet but steady band got inflated toward full — the "left bars a bit high when there's
+    // little music" bug. The standard AnalyserNode normalization (byte/255) is driven by
+    // ABSOLUTE loudness, so a faint spectrum must draw short bars, regardless of how steady it
+    // is. The offline envelope XHR hangs, so the live analyser is the only source.
+    let freqCalls = 0
+    class FakeStream { getAudioTracks() { return [{ kind: 'audio' }] } }
+    class LiveAudio extends FakeAudio {
+      play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+      captureStream() { return new FakeStream() }
+    }
+    class FakeAnalyser {
+      constructor() { this.fftSize = 2048; this.smoothingTimeConstant = 0.3; this.frequencyBinCount = 1024 }
+      connect() {}
+      getByteFrequencyData(arr) {
+        freqCalls++
+        // A faint, steady spectrum: every bin is just above the silence floor (byte 24). In
+        // absolute dB this is quiet content, so the bars must stay short.
+        for (let i = 0; i < arr.length; i++) arr[i] = 24
+      }
+    }
+    class LiveCtx {
+      constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
+      resume() { this.state = 'running'; return Promise.resolve() }
+      close() { this.state = 'closed' }
+      createMediaStreamSource() { return { connect: () => {} } }
+      createAnalyser() { return new FakeAnalyser() }
+    }
+    class HungXHR { open() {} send() {} }
+    const rects = []
+    const fakeCtx = { clearRect: () => {}, fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) }, fillStyle: '' }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    let rafCb = null
+    vi.stubGlobal('Audio', LiveAudio)
+    vi.stubGlobal('AudioContext', LiveCtx)
+    vi.stubGlobal('XMLHttpRequest', HungXHR)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    const origGetCtx = HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.getContext = () => fakeCtx
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const canvas = container.querySelector('.dsh-music-viz')
+      expect(canvas).toBeTruthy()
+      rects.length = 0
+      // A few frames so the bars settle; clear each frame so rects holds only the last frame.
+      for (let i = 0; i < 6; i++) { rects.length = 0; act(() => { rafCb() }) }
+      expect(freqCalls).toBeGreaterThan(0)
+      const bottom = canvas.height - 1
+      const bars = rects.filter((r) => r.y + r.h === bottom)
+      expect(bars.length).toBe(12)
+      // Absolute loudness drives the bar, so a quiet (faint) spectrum stays LOW. (Per-band
+      // auto-gain would have inflated these to near-full.)
+      expect(bars.every((r) => r.h < canvas.height * 0.5)).toBe(true)
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetCtx
     }
@@ -1049,7 +1132,7 @@ describe('dsh-music-player client render smoke', () => {
       expect(freqCalls).toBe(0)
       const bottom = canvas.height - 1
       const bars = rects.filter((r) => r.y + r.h === bottom)
-      expect(bars.length).toBe(8)
+      expect(bars.length).toBe(12)
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetCtx
     }
