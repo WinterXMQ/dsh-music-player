@@ -5001,4 +5001,55 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(true)
   })
+
+  it('renders the 系统配置 tab with lyric/spectrum toggles defaulting on and persists changes', async () => {
+    // Fresh boot: no prefs set -> both toggles default ON.
+    prefsServer = {}; vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+
+    // switch to the new 系统配置 tab
+    const configTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置')
+    expect(configTab).toBeTruthy()
+    act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // two toggle rows, each checked ON by default
+    const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
+    expect(toggles.length).toBe(2)
+    expect(toggles[0].getAttribute('aria-checked')).toBe('true') // lyric
+    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // viz
+
+    // turn OFF the lyric toggle
+    act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
+    const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
+    expect(lyricPost).toBeTruthy()
+    expect(lyricPost.prefs['dsh-music-show-lyric']).toBe('0')
+    expect(prefsServer['dsh-music-show-lyric']).toBe('0')
+
+    // restart: the saved OFF value must be restored (not defaulted back to on)
+    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1' }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const bar2 = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container2 = document.createElement('div')
+    document.body.appendChild(container2)
+    const root2 = createRoot(container2)
+    act(() => { root2.render(React.createElement('div', null, bar2, panel2)) })
+    act(() => { container2.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const configTab2 = [...container2.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置')
+    act(() => { configTab2.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const toggles2 = [...container2.querySelectorAll('.dsh-music-toggle')]
+    expect(toggles2[0].getAttribute('aria-checked')).toBe('false') // lyric restored OFF
+    expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
+  })
 })
