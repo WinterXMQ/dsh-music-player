@@ -5002,7 +5002,7 @@ describe('dsh-music-player client render smoke', () => {
     expect([...container.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '← 返回')).toBe(true)
   })
 
-  it('renders the 系统配置 tab with lyric/spectrum toggles defaulting on and persists changes', async () => {
+  it('renders the 系统配置 tab with lyric/spectrum/progress toggles defaulting on and persists changes', async () => {
     // Fresh boot: no prefs set -> both toggles default ON.
     prefsServer = {}; vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     await bootClient()
@@ -5020,22 +5020,29 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // two toggle rows, each checked ON by default
+    // three toggle rows, each checked ON by default
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    expect(toggles.length).toBe(2)
+    expect(toggles.length).toBe(3)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // lyric
     expect(toggles[1].getAttribute('aria-checked')).toBe('true') // viz
+    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // progress
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the progress toggle
+    act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
     expect(lyricPost).toBeTruthy()
     expect(lyricPost.prefs['dsh-music-show-lyric']).toBe('0')
     expect(prefsServer['dsh-music-show-lyric']).toBe('0')
+    const progressPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-progress'])
+    expect(progressPost).toBeTruthy()
+    expect(progressPost.prefs['dsh-music-show-progress']).toBe('0')
+    expect(prefsServer['dsh-music-show-progress']).toBe('0')
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
-    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1' }
+    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0' }
     vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     await bootClient()
     const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -5051,5 +5058,63 @@ describe('dsh-music-player client render smoke', () => {
     const toggles2 = [...container2.querySelectorAll('.dsh-music-toggle')]
     expect(toggles2[0].getAttribute('aria-checked')).toBe('false') // lyric restored OFF
     expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
+    expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // progress restored OFF
+  })
+
+  it('renders the 沉浸感 slider defaulting to 50% and persists/restores a custom value', async () => {
+    // default: immerse slider present at 50%
+    prefsServer = {}; vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const configTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置')
+    act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    const range = container.querySelector('.dsh-music-config-range')
+    expect(range).toBeTruthy()
+    expect(Number(range.value)).toBe(50)
+    expect(container.querySelector('.dsh-music-config-val').textContent).toBe('50%')
+
+    // default 50% 沉浸 -> bar opacity var is 1 - 0.5 = 0.5 (半透明)
+    const barEl = container.querySelector('.dsh-music-bar')
+    expect(Number(barEl.style.getPropertyValue('--dsh-music-immerse'))).toBeCloseTo(0.5, 5)
+
+    // set it to 20% -> persists 0.2 to the Host (React onChange fires on 'input')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(range, '20')
+      range.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
+    const immersePost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-immerse'])
+    expect(immersePost).toBeTruthy()
+    expect(Number(immersePost.prefs['dsh-music-immerse'])).toBeCloseTo(0.2, 5)
+    expect(Number(prefsServer['dsh-music-immerse'])).toBeCloseTo(0.2, 5)
+    // 20% 沉浸 -> opacity 1 - 0.2 = 0.8（趋向不透明，方向正确）
+    expect(Number(barEl.style.getPropertyValue('--dsh-music-immerse'))).toBeCloseTo(0.8, 5)
+
+    // restart: the saved 0.2 must be restored (slider shows 20%)
+    prefsServer = { ...prefsServer, 'dsh-music-immerse': '0.2' }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+    const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const bar2 = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container2 = document.createElement('div')
+    document.body.appendChild(container2)
+    const root2 = createRoot(container2)
+    act(() => { root2.render(React.createElement('div', null, bar2, panel2)) })
+    act(() => { container2.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const configTab2 = [...container2.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置')
+    act(() => { configTab2.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const range2 = container2.querySelector('.dsh-music-config-range')
+    expect(Number(range2.value)).toBe(20)
+    expect(container2.querySelector('.dsh-music-config-val').textContent).toBe('20%')
   })
 })
