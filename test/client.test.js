@@ -1371,14 +1371,14 @@ describe('dsh-music-player client render smoke', () => {
     // drag the corner handle 100px right and 150px down
     act(() => { handle.dispatchEvent(pointer('pointerdown', 800, 600)) })
     act(() => { handle.dispatchEvent(pointer('pointermove', 900, 750)) })
-    expect(parseInt(panelEl.style.width, 10)).toBe(560)   // 460 + 100
+    expect(parseInt(panelEl.style.width, 10)).toBe(700)   // 600 + 100
     expect(parseInt(panelEl.style.height, 10)).toBeGreaterThanOrEqual(200) // clamped min
     expect(panelEl.style.maxHeight).toBe('none') // explicit height wins over 72vh
     expect(panelEl.style.minHeight).toBe('') // auto-size min-height released once fixed
     // the resize is mirrored to the Host prefs (flushed on the ~800ms debounce)
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
     const saved = JSON.parse(prefsServer['dsh-music-panel-pos'])
-    expect(saved).toMatchObject({ w: 560 })
+    expect(saved).toMatchObject({ w: 700 })
     expect(typeof saved.h).toBe('number')
     // shrink back below the min clamps to 320
     act(() => { handle.dispatchEvent(pointer('pointermove', 500, 300)) })
