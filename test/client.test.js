@@ -2645,16 +2645,17 @@ describe('dsh-music-player client render smoke', () => {
 
   // 歌词换行动效装置：boot 后播放单曲目 a.mp3，返回可 emit timeupdate 的主 audio。
   // fxPref 为空时保持默认 none（无动效）；否则以 Host pref 预置 dsh-music-lyric-fx。
-  async function mountMusicFx({ fxPref } = {}) {
+  // localLrc=false 时本地无 .lrc → 走在线兜底（配合外部预置 lyricOnlineFixture）。
+  async function mountMusicFx({ fxPref, localLrc = true } = {}) {
     const audios = []
     class FxAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
       emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
     }
-    lyricFixture = {
+    lyricFixture = localLrc ? {
       ok: true, hasLrc: true, name: 'a.lrc',
       lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
-    }
+    } : { ok: true, hasLrc: false, name: '', lrc: [] }
     try {
       vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
       manifest = baseManifest()
@@ -2771,6 +2772,48 @@ describe('dsh-music-player client render smoke', () => {
     // 行2 [5,20)s（末行用音频总长兜底）→ 15000ms，已过 2000ms → 负延迟对准行内进度
     expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('15000ms')
     expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2000ms')
+  })
+
+  it('QRC 逐字歌词：karaoke 扫色窗口取精确行时长（长间奏不摊平），暂停冻结动画时钟', async () => {
+    // /lyric 无本地 .lrc → 在线兜底返回 qq-qrc 的精确行窗口 [{t,end,text}]。
+    // 行 2 结束后到音频结束是「长间奏」：旧行为会把整个剩余时长当窗口拖慢扫速。
+    lyricOnlineFixture = {
+      ok: true, hasLyric: true, source: 'qq-qrc',
+      wordLines: [
+        { t: 0, end: 4.5, text: '第一句歌词' },
+        { t: 4.5, end: 9, text: '第二句歌词' },
+      ],
+    }
+    try {
+      const { container, audio } = await mountMusicFx({ fxPref: 'karaoke', localLrc: false })
+      audio.currentTime = 0
+      act(() => { audio.emit('timeupdate') })
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第一句歌词')
+      let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      // 行窗口 [0,4.5]s → 真实时长 4500ms（不是下一间隔、也不是估算值）
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4500ms')
+      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+
+      audio.currentTime = 7
+      act(() => { audio.emit('timeupdate') })
+      fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4500ms')
+      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2500ms')
+
+      // 末行唱完后（9~20s 长间奏）：行保持显示，但窗口仍 4500ms —— 不被摊平
+      audio.currentTime = 12
+      act(() => { audio.emit('timeupdate') })
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
+      const el = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(el.getAttribute('data-fx')).toBe('karaoke')
+      // 文本未变 → 不重挂 → 扫色停在已完成的满亮态，不会重新快跑一遍
+
+      // 暂停：fx 层挂 fxfrozen 类冻结动画时钟；恢复播放时移除
+      act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.querySelector('.dsh-music-bar-lyric-fx').classList.contains('fxfrozen')).toBe(true)
+    } finally { lyricOnlineFixture = null }
   })
 
   it('falls back to the online lyric when a local track has no .lrc (no source badge)', async () => {
