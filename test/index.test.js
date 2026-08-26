@@ -366,6 +366,40 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts the lyric fx pref through the allowlist, drops invalid fx and non-config keys (persistence regression)', async () => {
+    // 回归：新配置键若漏出 Host 白名单，POST 会被 sanitizePrefs 静默丢弃，
+    // 表现为「歌词动效设置刷新后重置」。fx 必须能存、能 GET 回读；
+    // 跑马灯/边缘渐隐是内置行为，不再有配置键（历史残留应被清理）。
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-lyric-fx': 'karaoke',
+          'dsh-music-lyric-marquee': '0',
+          'dsh-music-lyric-mask': '1',
+        } }) }),
+        res,
+      )
+      let d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      expect(d.prefs['dsh-music-lyric-fx']).toBe('karaoke')
+      expect('dsh-music-lyric-marquee' in d.prefs).toBe(false) // 已下线的配置键
+      expect('dsh-music-lyric-mask' in d.prefs).toBe(false)
+      // 非法 fx 枚举值丢弃
+      const res2 = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-lyric-fx': 'bogus',
+        } }) }),
+        res2,
+      )
+      d = JSON.parse(res2.body)
+      // bogus 被丢弃：快照里仍是第一次存的 karaoke，绝不是 bogus
+      expect(d.prefs['dsh-music-lyric-fx']).toBe('karaoke')
+    } finally { cleanup() }
+  })
+
   it('lists .txt novels as books in the manifest', async () => {
     // Books share the default root with music until a separate book root is set.
     const { handler, musicDir, cleanup } = boot({

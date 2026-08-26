@@ -2643,6 +2643,136 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricFixture = null }
   })
 
+  // 歌词换行动效装置：boot 后播放单曲目 a.mp3，返回可 emit timeupdate 的主 audio。
+  // fxPref 为空时保持默认 none（无动效）；否则以 Host pref 预置 dsh-music-lyric-fx。
+  async function mountMusicFx({ fxPref } = {}) {
+    const audios = []
+    class FxAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
+      manifest = baseManifest()
+      prefsServer = fxPref ? { 'dsh-music-lyric-fx': fxPref } : {}
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', FxAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      return { container, audio }
+    } finally { lyricFixture = null }
+  }
+
+  it("fx='slide'（显式选择）：每行歌词重挂载重放入场动画，上一行只经 data-prev 提供给伪元素（textContent 恒为当前行）", async () => {
+    const { container, audio } = await mountMusicFx({ fxPref: 'slide' })
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    let outer = container.querySelector('.dsh-music-bar-lyric')
+    expect(outer).toBeTruthy()
+    // 关键回归：textContent 是「纯净的当前行」（退场旧行放 CSS 伪元素，不进 DOM 文本）
+    expect(outer.textContent).toBe('第一句歌词')
+    let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(fxEl.getAttribute('data-fx')).toBe('slide')
+    expect(fxEl.getAttribute('data-prev')).toBeNull()
+    // 默认开启边缘渐隐遮罩；jsdom 无布局不会误判溢出（无 marquee 类、无 data-over）
+    expect(outer.getAttribute('data-mask')).toBe('1')
+    expect(outer.getAttribute('data-over')).toBeNull()
+    expect(container.querySelector('.dsh-music-bar-lyric-run.mq')).toBeNull()
+
+    // 前进到第二句：key(seq) 变化强制重挂载 → 浏览器里入场动画重放；
+    // 上一行只出现在 data-prev 属性上。
+    const fxFirst = fxEl
+    audio.currentTime = 6
+    act(() => { audio.emit('timeupdate') })
+    outer = container.querySelector('.dsh-music-bar-lyric')
+    expect(outer.textContent).toBe('第二句歌词')
+    fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(fxEl).not.toBe(fxFirst)                     // 确实重新挂载了
+    expect(fxEl.getAttribute('data-prev')).toBe('第一句歌词')
+  })
+
+  it("fx 默认 = 'none'（无动效）：不选择任何动效时行为与旧版硬切完全一致", async () => {
+    // 回归：默认值必须是无动效——未显式选择的用户不应看到任何换行动效。
+    const { container, audio } = await mountMusicFx()
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    const outer = container.querySelector('.dsh-music-bar-lyric')
+    expect(outer.textContent).toBe('第一句歌词')
+    const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(fxEl.getAttribute('data-fx')).toBe('none')
+    expect(fxEl.getAttribute('data-prev')).toBeNull()
+    audio.currentTime = 6
+    act(() => { audio.emit('timeupdate') })
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
+    // 无 key → React 复用同一节点（重挂载才有的入场动画在这里不存在）
+    expect(container.querySelector('.dsh-music-bar-lyric-fx')).toBe(fxEl)
+  })
+
+  it("fx='none'：与旧行为一致的硬切——不重挂载、无 data-prev、无动画属性", async () => {
+    const { container, audio } = await mountMusicFx({ fxPref: 'none' })
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    const outer = container.querySelector('.dsh-music-bar-lyric')
+    expect(outer.textContent).toBe('第一句歌词')
+    const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(fxEl.getAttribute('data-fx')).toBe('none')
+    expect(fxEl.getAttribute('data-prev')).toBeNull()
+    audio.currentTime = 6
+    act(() => { audio.emit('timeupdate') })
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
+    // 无 key → React 复用同一节点，即原始「硬切」语义
+    expect(container.querySelector('.dsh-music-bar-lyric-fx')).toBe(fxEl)
+    expect(fxEl.getAttribute('data-prev')).toBeNull()
+  })
+
+  it("fx='karaoke'：扫色时间轴随行携带（--kar-dur/--kar-delay），音乐用相邻 LRC 时间戳差", async () => {
+    const { container, audio } = await mountMusicFx({ fxPref: 'karaoke' })
+    audio.duration = 20
+    audio.currentTime = 0
+    act(() => { audio.emit('timeupdate') })
+    let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(fxEl.getAttribute('data-fx')).toBe('karaoke')
+    // 行1 [0,5)s → 时长 5000ms，起点处已过 0ms
+    expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('5000ms')
+    expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+    audio.currentTime = 7
+    act(() => { audio.emit('timeupdate') })
+    fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    // 行2 [5,20)s（末行用音频总长兜底）→ 15000ms，已过 2000ms → 负延迟对准行内进度
+    expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('15000ms')
+    expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2000ms')
+  })
+
   it('falls back to the online lyric when a local track has no .lrc (no source badge)', async () => {
     // 本地无同名 .lrc（/lyric 返回 hasLrc:false）→ 客户端自动请求 /dsh-music/lyric/online
     // （Host 走 QQ → LRCLIB 兜底）；取到词后直接显示歌词，不显示歌词来源标识。
@@ -5020,12 +5150,23 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // three toggle rows, each checked ON by default
+    // three toggle rows (歌词显示 / 频谱显示 / 进度条显示)，默认全开；
+    // 跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
     expect(toggles.length).toBe(3)
-    expect(toggles[0].getAttribute('aria-checked')).toBe('true') // lyric
-    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // viz
-    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // progress
+    expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
+    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
+    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 进度条显示
+
+    // 歌词动效分段选择器：五个选项，默认 none（无动效）选中
+    const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
+    expect(segBtns.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK扫色'])
+    expect(segBtns.findIndex((b) => b.classList.contains('on'))).toBe(0)
+    act(() => { segBtns[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
+    const fxPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-fx'])
+    expect(fxPost).toBeTruthy()
+    expect(fxPost.prefs['dsh-music-lyric-fx']).toBe('karaoke')
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -5040,6 +5181,14 @@ describe('dsh-music-player client render smoke', () => {
     expect(progressPost).toBeTruthy()
     expect(progressPost.prefs['dsh-music-show-progress']).toBe('0')
     expect(prefsServer['dsh-music-show-progress']).toBe('0')
+
+    // 歌词显示关闭 → 动效配置行联动隐藏；重新打开后恢复，且保留刚才选的 karaoke。
+    expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(0)
+    act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
+    const segRestored = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
+    expect(segRestored.length).toBe(5)
+    expect(segRestored.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke remembered
+    act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
     prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0' }
@@ -5059,6 +5208,14 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles2[0].getAttribute('aria-checked')).toBe('false') // lyric restored OFF
     expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
     expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // progress restored OFF
+    // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
+    // 恢复了之前选择的 karaoke。
+    const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
+    expect(segBtns2.length).toBe(0)
+    act(() => { toggles2[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
+    const segShown2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
+    expect(segShown2.length).toBe(5)
+    expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke restored
   })
 
   it('renders the 沉浸感 slider defaulting to 50% and persists/restores a custom value', async () => {
