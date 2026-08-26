@@ -1778,6 +1778,187 @@ describe('dsh-music-player client render smoke', () => {
     bookTextFixture = ''
   })
 
+  it('pre-warms the resumed chunk at restore so a restart resume is instant (TTS cache cold)', async () => {
+    // Regression: after restarting DSH the Host's in-memory TTS cache and the browser
+    // HTTP cache are both empty, so the resumed chunk must be re-synthesized (several
+    // to tens of seconds). While synthesizing, the bar sat pinned on the restored
+    // position with no sound and no moving subtitle — the exact "重启后续播卡住"
+    // symptom. The restore path must warm the resumed chunk in the background so the
+    // tap ▶ is near-instant instead of hanging on a cold synthesis.
+    const bookAudioFetches = []
+    const wrappedFetch = (url, opts) => {
+      const u = String(url)
+      const m = /^\/dsh-music\/book\/(b\d+)\?from=(\d+)/.exec(u)
+      if (m) bookAudioFetches.push({ id: m[1], from: parseInt(m[2], 10) })
+      return fetchStub(url, opts)
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '预热续播测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 100, 200, 300]
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '预热续播测试.txt': { from: 2, base: 400, pos: 5, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', wrappedFetch)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    // flush the restore-time async /meta + warm-fetch path
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // the resumed chunk (from=2) must have been warmed via a background fetch, so a
+    // cold synthesis isn't left to the tap ▶ (which would show a frozen bar).
+    expect(bookAudioFetches).toContainEqual({ id: 'b1', from: 2 })
+    bookTextFixture = ''
+  })
+
+  it('shows the "AI 合成中…" feedback when resuming a cold chunk and clears it on playback start', async () => {
+    // Regression: after restarting DSH the resumed chunk may still need synthesizing
+    // (cold cache). The resume path (togglePlay) never armed the buffer indicator or
+    // the 60s synthesis timeout, so the bar sat pinned on the restored position —
+    // 无声音、字幕不动、看起来像卡住. The resume path must show the same
+    // "AI 合成中… Ns" feedback as a fresh play, and clear it once playback truly starts.
+    const audios = []
+    class ResumeBufferAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this._resolvePlay = null }
+      play() {
+        this.paused = false
+        this._playPromise = new Promise((res) => { this._resolvePlay = res })
+        return this._playPromise
+      }
+      resolvePlay() { if (this._resolvePlay) { const r = this._resolvePlay; this._resolvePlay = null; r() } }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '续播缓冲反馈测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '续播缓冲反馈文本。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '续播缓冲反馈测试.txt': { from: 2, base: 400, pos: 3, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ResumeBufferAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // resume via ▶ → the bar must show the synthesis feedback while the chunk is cold
+    act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeTruthy()
+    // once playback truly starts, the feedback clears (no lingering spinner)
+    audio.resolvePlay()
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
+    bookTextFixture = ''
+  })
+
+  it('jumps to the NEXT chunk when the saved position is beyond the re-synthesized chunk (no replay, no clamp-to-end stall)', async () => {
+    // Regression ("重启后点以前听过的书 → 合成完响一下就没声音、字幕不动"): after a DSH
+    // restart the chunk is re-synthesized and may come out SHORTER than the saved
+    // in-chunk position. Seeking to that saved pos clamps to the chunk END, and the
+    // browser may not fire `ended` — the audio stalls after a blip. Since the saved
+    // position is past this chunk, the reader has effectively finished it, so the
+    // correct resume is to JUMP to the next chunk — not replay this one, and never
+    // force currentTime to an out-of-range/clamped position.
+    const audios = []
+    class ReSynthShorterAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '重合成变短续播.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookCharOffsets = [0, 100, 200, 300]
+    bookTextFixture = '重合成变短续播文本。'
+    // saved pos=25 was valid for the OLD 30s chunk; after restart the re-synthesized
+    // chunk is only 20s, so pos is now beyond the chunk (the user finished chunk 2).
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '重合成变短续播.txt': { from: 2, base: 400, pos: 25, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ReSynthShorterAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+    act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('重合成变短续播'))
+    act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=2')
+
+    // Duration still unknown (metadata not loaded) when the pin first runs: the pin
+    // must NOT seek currentTime to pos yet (it would be clamped later to a wrong spot).
+    audio.duration = NaN
+    act(() => { audio.emit('durationchange') }) // onDur ignores NaN
+    act(() => { audio.emit('play') })
+    audio.currentTime = 0.1
+    act(() => { audio.emit('timeupdate') })
+    expect(audio.currentTime).toBeLessThan(1) // not forced to the (unknown) pos
+
+    // Duration resolves to 20s (< saved pos 25): the saved position is past the chunk,
+    // so the reader has finished it — the book must JUMP to the NEXT chunk (from=3),
+    // not re-listen chunk 2 and never force currentTime to the clamped 20s end.
+    audio.duration = 20
+    act(() => { audio.emit('durationchange') })
+    audio.currentTime = 0.1
+    act(() => { audio.emit('timeupdate') })
+    expect(audio.src).toContain('from=3')        // jumped forward to chunk 3
+    expect(audio.currentTime).toBeLessThan(1)    // never clamped to the 20s end
+
+    // The next chunk plays fresh (no stale pin), and the book continues normally.
+    audio.duration = 30
+    audio.currentTime = 0.1
+    act(() => { audio.emit('durationchange') })
+    act(() => { audio.emit('timeupdate') })
+    expect(audio.currentTime).toBeLessThan(1)
+    bookTextFixture = ''
+  })
+
   it('does NOT append a chapter name or the “-” separator when the novel has no chapters', async () => {
     // A novel with no detectable section structure must show ONLY the book title
     // in the bar — no " - " and no chapter text appended (currentSection stays '').
