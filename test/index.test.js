@@ -1239,11 +1239,7 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
       const body = JSON.parse(res.body)
       expect(body.ok).toBe(true)
       expect(body.source).toBe('qq-qrc')
-      expect(body.wordLines).toEqual([{ t: 0.5, end: 2.5, text: '你好世', words: [
-        { text: '你', s: 0, d: 0.7 },
-        { text: '好', s: 0.7, d: 0.6 },
-        { text: '世', s: 1.3, d: 0.4 },
-      ] }])
+      expect(body.wordLines).toEqual([{ t: 0.5, end: 2.5, text: '你好世' }])
       expect(stub.calls.qqSongInfo).toBe(1)
       expect(stub.calls.qqQrc).toBe(1)
       expect(stub.calls.qqLyric).toBe(0)

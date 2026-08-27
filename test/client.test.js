@@ -2818,47 +2818,35 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricOnlineFixture = null }
   })
 
-  it('QRC 词级时间轴：karaoke 进入逐字点亮模式（data-wordmode），无词级行回落整行扫色', async () => {
-    // 行带 words（行内相对秒）→ fx 层标记 data-wordmode，渲染 N 个词 span，
-    // 初始类按 scan.elapsed 静态判定（jsdom 无 rAF 帧循环时的正确首帧）。
+  it('QRC 行窗口恒走整行扫色：词级数据即使存在也不渲染逐字 span（逐字点亮已移除）', async () => {
+    // 回归：payload 里残留 words 字段（或未来恢复下发）也不得改变渲染——
+    // fx 层无 data-wordmode、DOM 无 .dsh-music-word，扫色仍是整行渐变。
     lyricOnlineFixture = {
       ok: true, hasLyric: true, source: 'qq-qrc',
       wordLines: [
         { t: 0, end: 4, text: '你好世界', words: [
           { text: '你', s: 0, d: 1 }, { text: '好', s: 1, d: 1 },
-          { text: '世', s: 2, d: 1 }, { text: '界', s: 3, d: 1 },
         ] },
-        { t: 4, end: 8, text: '再见了朋友', words: [] },
+        { t: 4, end: 8, text: '再见了朋友' },
       ],
     }
     try {
       const { container, audio } = await mountMusicFx({ fxPref: 'karaoke', localLrc: false })
-      audio.currentTime = 2.5   // 行内已过 2500ms：「你」「好」唱完、「世」正唱
+      audio.currentTime = 2.5
       act(() => { audio.emit('timeupdate') })
+      const outer = container.querySelector('.dsh-music-bar-lyric')
+      expect(outer.getAttribute('data-src')).toBe('qq-qrc')
       const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
-      expect(fxEl.getAttribute('data-fx')).toBe('karaoke')
-      expect(fxEl.getAttribute('data-wordmode')).toBe('1')
-      // 来源标记：wordLines 形态 → data-src="qq-qrc"（QRC 生效的直接证据）
-      expect(container.querySelector('.dsh-music-bar-lyric').getAttribute('data-src')).toBe('qq-qrc')
-      // 整行渐变扫色变量不应出现（门控生效）
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('')
-      const spans = [...fxEl.querySelectorAll(':scope > .dsh-music-word')]
-      expect(spans.map((s2) => s2.textContent)).toEqual(['你', '好', '世', '界'])
-      expect(spans[0].classList.contains('done')).toBe(true)
-      expect(spans[1].classList.contains('done')).toBe(true)
-      expect(spans[2].classList.contains('act')).toBe(true)
-      expect(spans[2].classList.contains('done')).toBe(false)
-      expect(spans[3].classList.contains('done')).toBe(false)
-      expect(spans[3].classList.contains('act')).toBe(false)
-      // 词 span 文本拼接 = 整行文本（textContent 纯净性保持）
+      expect(fxEl.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl.textContent).toBe('你好世界')
+      expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
+      // 整行渐变扫色变量正常出现
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4000ms')
 
-      // 切到第二行（words=[] 空）→ 回落整行扫色：data-wordmode 消失、--kar-dur 出现
       audio.currentTime = 5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('再见了朋友')
-      expect(fxEl2.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('4000ms')
     } finally { lyricOnlineFixture = null }
   })
@@ -3769,9 +3757,9 @@ describe('dsh-music-player client render smoke', () => {
     } finally { qqLyricFixture = null }
   })
 
-  it('QQ 在线歌曲也走 QRC 逐字歌词：karaoke 下进入 wordmode 渲染', async () => {
-    // /dsh-music/qq/lyric 返回 wordLines 形态 → loadQQLyric 消费 musicWordLyric，
-    // karaoke 动效下 fx 层标记 data-wordmode 并渲染词 span；data-src="qq-qrc"。
+  it('QQ 在线歌曲也走 QRC 行窗口：karaoke 整行扫色窗口取精确行时长', async () => {
+    // /dsh-music/qq/lyric 返回 wordLines 形态 → loadQQLyric 消费 musicWordLyric；
+    // karaoke 动效下整行扫色的 --kar-dur 取 QRC 精确行时长；data-src="qq-qrc"。
     const audios = []
     class QrcAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -3782,11 +3770,8 @@ describe('dsh-music-player client render smoke', () => {
     qqLyricFixture = {
       ok: true, hasLyric: true, source: 'qq-qrc',
       wordLines: [
-        { t: 0, end: 3, text: '告白气球', words: [
-          { text: '告', s: 0, d: 0.75 }, { text: '白', s: 0.75, d: 0.75 },
-          { text: '气', s: 1.5, d: 0.75 }, { text: '球', s: 2.25, d: 0.75 },
-        ] },
-        { t: 3, end: 6, text: '亲爱的 爱上你', words: [] },
+        { t: 0, end: 3, text: '告白气球' },
+        { t: 3, end: 6, text: '亲爱的 爱上你' },
       ],
     }
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
@@ -3829,26 +3814,26 @@ describe('dsh-music-player client render smoke', () => {
       const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
       act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 行内进度 1.2s：「告」唱完、「白」正唱
+      // 行窗口 [0,3]s → 整行扫色 --kar-dur 3000ms（精确行时长）。
+      // 注意扫色 delay 只在「换行重挂」时计算（中途改 CSS delay 会重启动画闪帧，
+      // 这是既定取舍）：先在行起点校准，再跨行验证负延迟对准。
       audio.duration = 30
-      audio.currentTime = 1.2
+      audio.currentTime = 0
       act(() => { audio.emit('timeupdate') })
       const outer = container.querySelector('.dsh-music-bar-lyric')
       expect(outer.getAttribute('data-src')).toBe('qq-qrc')
       const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
-      expect(fxEl.getAttribute('data-wordmode')).toBe('1')
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('') // 整行渐变被门控
-      const spans = [...fxEl.querySelectorAll(':scope > .dsh-music-word')]
-      expect(spans.map((s2) => s2.textContent)).toEqual(['告', '白', '气', '球'])
-      expect(spans[0].classList.contains('done')).toBe(true)
-      expect(spans[1].classList.contains('act')).toBe(true)
-      // 无词级行回落整行扫色
+      expect(fxEl.textContent).toBe('告白气球')
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('3000ms')
+      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+      expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
+      // 第二行窗口 [3,6]s：换行重挂 → 负延迟对准行内已过时间（4.5−3=1500ms）
       audio.currentTime = 4.5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('亲爱的 爱上你')
-      expect(fxEl2.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('3000ms')
+      expect(fxEl2.style.getPropertyValue('--kar-delay')).toBe('-1500ms')
     } finally {
       qqLyricFixture = null
       prefsServer = {}
