@@ -377,6 +377,8 @@ describe('dsh-music-player host routes', () => {
       await handler(
         makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
           'dsh-music-lyric-fx': 'karaoke',
+          'dsh-music-show-quality': '0',
+          'dsh-music-show-bar-bg': '0',
           'dsh-music-lyric-marquee': '0',
           'dsh-music-lyric-mask': '1',
         } }) }),
@@ -385,6 +387,8 @@ describe('dsh-music-player host routes', () => {
       let d = JSON.parse(res.body)
       expect(d.ok).toBe(true)
       expect(d.prefs['dsh-music-lyric-fx']).toBe('karaoke')
+      expect(d.prefs['dsh-music-show-quality']).toBe('0')
+      expect(d.prefs['dsh-music-show-bar-bg']).toBe('0')
       expect('dsh-music-lyric-marquee' in d.prefs).toBe(false) // 已下线的配置键
       expect('dsh-music-lyric-mask' in d.prefs).toBe(false)
       // 非法 fx 枚举值丢弃
