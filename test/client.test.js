@@ -2796,20 +2796,20 @@ describe('dsh-music-player client render smoke', () => {
       // 音频时钟模式生效：无 --kar-dur 动画变量，标记 data-audioclock；行起点 → 100%
       expect(fxEl.getAttribute('data-audioclock')).toBe('1')
       expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('')
-      expect(fxEl.style.backgroundPositionX).toBe('100.00%')
+      expect(fxEl.style.backgroundPositionX).toBe('70.00%')
 
       // 行内进度：7s，第二行 [4.5,9]s 已过 2.5/4.5 → 位置 (1-5/9)=44.44%
       audio.currentTime = 7
       act(() => { audio.emit('timeupdate') })
       fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
-      expect(fxEl.style.backgroundPositionX).toBe('44.44%')
+      expect(fxEl.style.backgroundPositionX).toBe('32.96%')   // f=5/9 → (1.05−f)/1.5
 
       // 行内 seek 漂移修正：直接跳到行尾附近，下一拍立即对齐（旧墙钟动画做不到）
       audio.currentTime = 8.8
       act(() => { audio.emit('timeupdate') })
       fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
-      expect(fxEl.style.backgroundPositionX).toBe('4.44%')   // (1 - 4300/4500)
+      expect(fxEl.style.backgroundPositionX).toBe('6.30%')   // (1.05−0.956)/1.5
 
       // 末行唱完后（9~20s 长间奏）：行保持显示、扫色停在满亮 0% —— 不摊平不重跑
       audio.currentTime = 12
@@ -2817,7 +2817,7 @@ describe('dsh-music-player client render smoke', () => {
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
       const el = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(el.getAttribute('data-fx')).toBe('karaoke')
-      expect(el.style.backgroundPositionX).toBe('0.00%')
+      expect(el.style.backgroundPositionX).toBe('3.33%')      // 唱完/间奏：分界停在屏外满亮态
 
       // 暂停：fx 层仍挂 fxfrozen 类（跑马灯/入场动画时钟冻结）
       act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -2850,13 +2850,13 @@ describe('dsh-music-player client render smoke', () => {
       expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
       // 音频时钟模式：行 [0,4]s 已过 2.5s → 位置 (1-2500/4000)=37.50%
       expect(fxEl.getAttribute('data-audioclock')).toBe('1')
-      expect(fxEl.style.backgroundPositionX).toBe('37.50%')
+      expect(fxEl.style.backgroundPositionX).toBe('28.33%')   // f=2500/4000
 
       audio.currentTime = 5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('再见了朋友')
-      expect(fxEl2.style.backgroundPositionX).toBe('75.00%')   // 行 [4,8]s 过 1s
+      expect(fxEl2.style.backgroundPositionX).toBe('53.33%')   // f=1000/4000
     } finally { lyricOnlineFixture = null }
   })
 
@@ -3833,14 +3833,14 @@ describe('dsh-music-player client render smoke', () => {
       expect(fxEl.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl.textContent).toBe('告白气球')
       expect(fxEl.getAttribute('data-audioclock')).toBe('1')
-      expect(fxEl.style.backgroundPositionX).toBe('60.00%')
+      expect(fxEl.style.backgroundPositionX).toBe('43.33%')   // f=1200/3000
       expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
       // 第二行窗口 [3,6]s：4.5s → 50.00%
       audio.currentTime = 4.5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('亲爱的 爱上你')
-      expect(fxEl2.style.backgroundPositionX).toBe('50.00%')
+      expect(fxEl2.style.backgroundPositionX).toBe('36.67%')   // f=1500/3000
     } finally {
       qqLyricFixture = null
       prefsServer = {}
