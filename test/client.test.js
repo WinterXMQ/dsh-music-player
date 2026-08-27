@@ -5493,20 +5493,20 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
-    // 歌词动效分段选择器：五个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
+    // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns.slice(0, 5).map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK'])
-    expect(segBtns.slice(0, 5).findIndex((b) => b.classList.contains('on'))).toBe(0)
-    act(() => { segBtns[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(segBtns.slice(0, 4).map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '模糊浮入', '卡拉OK'])
+    expect(segBtns.slice(0, 4).findIndex((b) => b.classList.contains('on'))).toBe(0)
+    act(() => { segBtns[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 卡拉OK
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const fxPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-fx'])
     expect(fxPost).toBeTruthy()
     expect(fxPost.prefs['dsh-music-lyric-fx']).toBe('karaoke')
 
     // 频谱样式分段选择器：柱状图/波形图，默认「柱状图」选中；切到「波形图」并持久化。
-    expect(segBtns.slice(5).map((b) => b.textContent)).toEqual(['柱状图', '波形图'])
-    expect(segBtns.findIndex((b) => b.textContent === '柱状图' && b.classList.contains('on'))).toBe(5)
-    act(() => { segBtns[6].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 波形图
+    expect(segBtns.slice(4).map((b) => b.textContent)).toEqual(['柱状图', '波形图'])
+    expect(segBtns.findIndex((b) => b.textContent === '柱状图' && b.classList.contains('on'))).toBe(4)
+    act(() => { segBtns[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 波形图
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const vizPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-viz-mode'])
     expect(vizPost).toBeTruthy()
@@ -5544,8 +5544,8 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(2) // 仅频谱样式
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
     const segRestored = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segRestored.length).toBe(7)
-    expect(segRestored.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke remembered
+    expect(segRestored.length).toBe(6)
+    expect(segRestored.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke remembered
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
@@ -5574,10 +5574,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(segBtns2.length).toBe(2) // 仅频谱样式（showViz=ON，lyric=OFF）
     act(() => { toggles2[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
     const segShown2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segShown2.length).toBe(7)
-    expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke restored
+    expect(segShown2.length).toBe(6)
+    expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke restored
     // 频谱样式也在跨重启后恢复为之前选择的「波形图」。
-    expect(segShown2.findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(6)
+    expect(segShown2.findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(5)
   })
 
   it('renders the 沉浸感 slider defaulting to 50% and persists/restores a custom value', async () => {
