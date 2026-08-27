@@ -2621,6 +2621,8 @@ describe('dsh-music-player client render smoke', () => {
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
       expect(lyric.textContent).toContain('第一句歌词')
+      // 来源标记：本地同名 .lrc → data-src="local"
+      expect(lyric.getAttribute('data-src')).toBe('local')
       // 歌词在 .dsh-music-bar-controls（时长）之前、频谱之后（DOM 顺序断言）
       const controls = container.querySelector('.dsh-music-bar-controls')
       const idxLyric = [...barEl.children].indexOf(lyric)
@@ -2836,6 +2838,8 @@ describe('dsh-music-player client render smoke', () => {
       const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(fxEl.getAttribute('data-fx')).toBe('karaoke')
       expect(fxEl.getAttribute('data-wordmode')).toBe('1')
+      // 来源标记：wordLines 形态 → data-src="qq-qrc"（QRC 生效的直接证据）
+      expect(container.querySelector('.dsh-music-bar-lyric').getAttribute('data-src')).toBe('qq-qrc')
       // 整行渐变扫色变量不应出现（门控生效）
       expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('')
       const spans = [...fxEl.querySelectorAll(':scope > .dsh-music-word')]
@@ -2881,6 +2885,8 @@ describe('dsh-music-player client render smoke', () => {
       const lyric = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric).toBeTruthy()
       expect(lyric.textContent).toContain('窗外的麻雀')
+      // 来源可观测：在线兜底普通 LRC → data-src="qq"（诊断 QRC 是否生效的标记）
+      expect(lyric.getAttribute('data-src')).toBe('qq')
       // 不显示来源标识（QQ / LRCLIB 小标已移除）
       expect(container.querySelector('.dsh-music-bar-lyric-src')).toBeNull()
     } finally { lyricOnlineFixture = null }
