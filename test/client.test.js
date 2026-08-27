@@ -807,44 +807,49 @@ describe('dsh-music-player client render smoke', () => {
     expect(controls.classList.contains('on')).toBe(false)
   })
 
-  it('draws a real precomputed FFT spectrum (12 bars) on the 60px canvas from the decoded track', async () => {
-    // The spectrum is computed offline (real FFT per 50ms window) during decodeAudioData
-    // and drawn as 8 log-spaced bars following currentTime. It must work WITHOUT touching
-    // the Web Audio output graph — the AnalyserNode routing approach broke this environment's
-    // Chromium media pipeline (getTopURL TypeError). FakeXHR delivers the arraybuffer, the
-    // fake AudioContext decodes it into a 440Hz sine, and a rAF tick must draw 8 bars.
-    class FakeXHR {
-      constructor() { this.response = new ArrayBuffer(1) }
-      open() {}
-      send() { if (typeof this.onload === 'function') this.onload() }
-    }
-    class FakeAudioContext {
-      constructor() { this.state = 'running' }
-      decodeAudioData() {
-        const sr = 8000
-        const ch = new Float32Array(sr)
-        for (let i = 0; i < sr; i++) ch[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / sr)
-        return Promise.resolve({ sampleRate: sr, duration: 1, numberOfChannels: 1, getChannelData: () => ch })
-      }
-      close() { this.state = 'closed' }
-    }
-    // FakeAudio.play() sets paused=false but never fires 'play' — subclass to dispatch it
-    // so s.playing becomes true and the viz canvas actually mounts.
-    class PlayAudio extends FakeAudio {
+  it('draws an oscilloscope-style waveform from the live time-domain analyser data', async () => {
+    // Waveform mode (dsh-music-viz-mode = 'wave') draws a single continuous curve from
+    // getByteTimeDomainData instead of frequency bars. It is driven by the live
+    // captureStream+AnalyserNode tap only — no offline fallback — so a non-flat time-domain
+    // read must produce a stroked path, and no bars (fillRect) are drawn.
+    prefsServer = { 'dsh-music-viz-mode': 'wave' }
+    class FakeStream { getAudioTracks() { return [{ kind: 'audio' }] } }
+    class LiveAudio extends FakeAudio {
       play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+      captureStream() { return new FakeStream() }
     }
-    const rects = []
+    class FakeAnalyser {
+      constructor() { this.fftSize = 2048; this.smoothingTimeConstant = 0.3; this.frequencyBinCount = 1024 }
+      connect() {}
+      getByteFrequencyData(arr) { for (let i = 0; i < arr.length; i++) arr[i] = 120 }
+      getByteTimeDomainData(arr) {
+        // A clear sine around the 128 center line: enough deviation to draw a real curve.
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.round(128 + 100 * Math.sin((2 * Math.PI * 4 * i) / arr.length))
+      }
+    }
+    class LiveCtx {
+      constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
+      resume() { this.state = 'running'; return Promise.resolve() }
+      close() { this.state = 'closed' }
+      createMediaStreamSource() { return { connect: () => {} } }
+      createAnalyser() { return new FakeAnalyser() }
+    }
+    let strokes = 0
     const fakeCtx = {
       clearRect: () => {},
-      fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) },
-      fillStyle: '',
+      beginPath: () => {},
+      moveTo: () => {},
+      lineTo: () => {},
+      stroke: () => { strokes++ },
+      fillRect: () => {},
+      fillStyle: '', strokeStyle: '', lineWidth: 0, lineCap: '', lineJoin: '',
     }
     vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     let rafCb = null
-    vi.stubGlobal('Audio', PlayAudio)
-    vi.stubGlobal('AudioContext', FakeAudioContext)
-    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    vi.stubGlobal('Audio', LiveAudio)
+    vi.stubGlobal('AudioContext', LiveCtx)
+    vi.stubGlobal('XMLHttpRequest', class { open() {} send() {} })
     vi.stubGlobal('fetch', fetchStub)
     vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
     vi.stubGlobal('cancelAnimationFrame', () => {})
@@ -869,19 +874,13 @@ describe('dsh-music-player client render smoke', () => {
       const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
       act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // playing -> the 60px viz canvas is mounted
       const canvas = container.querySelector('.dsh-music-viz')
       expect(canvas).toBeTruthy()
-      expect(canvas.width).toBe(60)
-      // the decode populated the per-window FFT bands; a rAF tick draws 8 bars
-      // (plus optional 2px peak caps at the top — count only the bottom-anchored bars)
-      rects.length = 0
+      strokes = 0
       act(() => { rafCb() })
-      const bottom = canvas.height - 1
-      const bars = rects.filter((r) => r.y + r.h === bottom)
-      expect(bars.length).toBe(12)
-      expect(bars.every((r) => r.h >= 2)).toBe(true)
-      expect(fakeCtx.fillStyle).toBe('#2f9e6e')
+      // Waveform mode draws one stroked curve PER frequency band (multi-line): the 3 bands
+      // (low/mid/high) each call stroke() once, and no bars (fillRect) are drawn.
+      expect(strokes).toBe(3)
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetCtx
     }
@@ -1057,11 +1056,12 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
-  it('falls back to the offline FFT envelope when the live tap yields no audio track (getTopURL)', async () => {
+  it('shows nothing when the live tap yields no audio track (no offline fallback)', async () => {
     // This browser's media pipeline won't let a Web Audio source/tap read the proxied
     // stream (an internal "getTopURL" TypeError), so captureStream returns a MediaStream
     // with NO audio track. setupLiveViz must not fail hard — it leaves the live analyser
-    // unset, and the offline FFT envelope drives the bars (audio is never touched).
+    // unset, and since there is NO offline fallback, the visualization simply draws nothing
+    // (audio is never touched).
     let freqCalls = 0
     let tapAttempted = false
     // Stream that carries no audio track (the getTopURL case in this environment).
@@ -1075,28 +1075,22 @@ describe('dsh-music-player client render smoke', () => {
       getByteFrequencyData(arr) { freqCalls++; for (let i = 0; i < arr.length; i++) arr[i] = 200 }
     }
     // AudioContext with a MediaStreamSource + AnalyserNode (but the stream has no track,
-    // so setupLiveViz bails before using them) plus decodeAudioData for the offline env.
-    class FallbackCtx {
+    // so setupLiveViz bails before using them).
+    class NoTrackCtx {
       constructor() { this.state = 'running'; this.sampleRate = 48000; this.destination = {} }
       resume() { this.state = 'running'; return Promise.resolve() }
       close() { this.state = 'closed' }
       createMediaStreamSource() { return { connect: () => {} } }
       createAnalyser() { return new FakeAnalyser() }
-      decodeAudioData() {
-        const sr = 8000; const ch = new Float32Array(sr)
-        for (let i = 0; i < sr; i++) ch[i] = 0.6 * Math.sin((2 * Math.PI * 440 * i) / sr)
-        return Promise.resolve({ sampleRate: sr, duration: 1, numberOfChannels: 1, getChannelData: () => ch })
-      }
     }
-    class FakeXHR { constructor() { this.response = new ArrayBuffer(1) } open() {} send() { if (typeof this.onload === 'function') this.onload() } }
     const rects = []
     const fakeCtx = { clearRect: () => {}, fillRect: (x, y, w, h) => { rects.push({ x, y, w, h }) }, fillStyle: '' }
     vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
     window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
     let rafCb = null
     vi.stubGlobal('Audio', LiveAudio)
-    vi.stubGlobal('AudioContext', FallbackCtx)
-    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+    vi.stubGlobal('AudioContext', NoTrackCtx)
+    vi.stubGlobal('XMLHttpRequest', class { open() {} send() {} })
     vi.stubGlobal('fetch', fetchStub)
     vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
     vi.stubGlobal('cancelAnimationFrame', () => {})
@@ -1127,12 +1121,12 @@ describe('dsh-music-player client render smoke', () => {
       freqCalls = 0
       act(() => { rafCb() })
       // The tap WAS attempted (captureStream called) but yielded no audio track, so
-      // getByteFrequencyData should NOT be read — the offline envelope drives the bars.
+      // getByteFrequencyData should NOT be read and NO bars/waveform are drawn.
       expect(tapAttempted).toBe(true)
       expect(freqCalls).toBe(0)
       const bottom = canvas.height - 1
       const bars = rects.filter((r) => r.y + r.h === bottom)
-      expect(bars.length).toBe(12)
+      expect(bars.length).toBe(0)
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetCtx
     }
@@ -5499,15 +5493,25 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
-    // 歌词动效分段选择器：五个选项，默认 none（无动效）选中
+    // 歌词动效分段选择器：五个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK'])
-    expect(segBtns.findIndex((b) => b.classList.contains('on'))).toBe(0)
+    expect(segBtns.slice(0, 5).map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK'])
+    expect(segBtns.slice(0, 5).findIndex((b) => b.classList.contains('on'))).toBe(0)
     act(() => { segBtns[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const fxPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-fx'])
     expect(fxPost).toBeTruthy()
     expect(fxPost.prefs['dsh-music-lyric-fx']).toBe('karaoke')
+
+    // 频谱样式分段选择器：柱状图/波形图，默认「柱状图」选中；切到「波形图」并持久化。
+    expect(segBtns.slice(5).map((b) => b.textContent)).toEqual(['柱状图', '波形图'])
+    expect(segBtns.findIndex((b) => b.textContent === '柱状图' && b.classList.contains('on'))).toBe(5)
+    act(() => { segBtns[6].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // 波形图
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
+    const vizPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-viz-mode'])
+    expect(vizPost).toBeTruthy()
+    expect(vizPost.prefs['dsh-music-viz-mode']).toBe('wave')
+    expect(prefsServer['dsh-music-viz-mode']).toBe('wave')
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -5535,11 +5539,12 @@ describe('dsh-music-player client render smoke', () => {
     expect(barBgPost.prefs['dsh-music-show-bar-bg']).toBe('0')
     expect(prefsServer['dsh-music-show-bar-bg']).toBe('0')
 
-    // 歌词显示关闭 → 动效配置行联动隐藏；重新打开后恢复，且保留刚才选的 karaoke。
-    expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(0)
+    // 歌词显示关闭 → 动效配置行联动隐藏（频谱样式选择器仍在，showViz 为开）；重新打开后恢复，
+    // 且保留刚才选的 karaoke。
+    expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(2) // 仅频谱样式
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
     const segRestored = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segRestored.length).toBe(5)
+    expect(segRestored.length).toBe(7)
     expect(segRestored.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke remembered
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
@@ -5566,11 +5571,13 @@ describe('dsh-music-player client render smoke', () => {
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns2.length).toBe(0)
+    expect(segBtns2.length).toBe(2) // 仅频谱样式（showViz=ON，lyric=OFF）
     act(() => { toggles2[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // lyric ON
     const segShown2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segShown2.length).toBe(5)
+    expect(segShown2.length).toBe(7)
     expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(4) // karaoke restored
+    // 频谱样式也在跨重启后恢复为之前选择的「波形图」。
+    expect(segShown2.findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(6)
   })
 
   it('renders the 沉浸感 slider defaulting to 50% and persists/restores a custom value', async () => {
