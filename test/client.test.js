@@ -2985,11 +2985,11 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('晴天')
     expect(container.textContent).toContain('周杰伦')  // artist name shows at the row tail
     // both songs and playlists exist → search results shown as two tabs, default 歌曲
-    const resultTabs = [...container.querySelectorAll('.dsh-music-qq-viewtab')].map((b) => b.textContent)
+    const resultTabs = [...container.querySelectorAll('.dsh-music-qq-resulttab')].map((b) => b.textContent)
     expect(resultTabs).toContain('歌曲')
     expect(resultTabs).toContain('相关歌单')
     // switch to 相关歌单 tab → playlists appear
-    const plTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '相关歌单')
+    const plTab = [...container.querySelectorAll('.dsh-music-qq-resulttab')].find((b) => b.textContent === '相关歌单')
     act(() => { plTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('周杰伦合集')
@@ -3034,7 +3034,7 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       // 切到「相关歌单」tab：满页 → 出现「加载更多」按钮
-      const plTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '相关歌单')
+      const plTab = [...container.querySelectorAll('.dsh-music-qq-resulttab')].find((b) => b.textContent === '相关歌单')
       expect(plTab).toBeTruthy()
       act(() => { plTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -4524,6 +4524,65 @@ describe('dsh-music-player client render smoke', () => {
     expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('kg')
   })
 
+  it('restores KuGou search history from the Host prefs even when the prefs fetch is slow (panel mounts before snapshot)', async () => {
+    // Timing regression: the /dsh-music/prefs snapshot can arrive AFTER the KG panel
+    // mounts (like QQ, it is eagerly mounted and hidden with display:none). The mount-time
+    // history read then sees an empty snapshot — serverPrefs is still null, so loadPref
+    // falls back to the legacy localStorage copy (never written in new builds, so empty) —
+    // and without a prefsReady re-read the history stays empty after a refresh. The KG
+    // panel's [s.prefsReady] effect must re-apply it once the Host snapshot lands.
+    prefsServer = { 'dsh-music-kg-history': JSON.stringify(['刀郎']) }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    // delay ONLY the /dsh-music/prefs GET to simulate network latency
+    vi.stubGlobal('fetch', (url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/prefs' && (!opts || !opts.method || opts.method === 'GET')) {
+        return new Promise((resolve) => setTimeout(() => resolve(jsonRes({ ok: true, prefs: prefsServer })), 120))
+      }
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      return fetchStub(url, opts)
+    })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    // render the panel immediately (before the 120ms prefs fetch resolves)
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // open panel -> 酷狗 tab -> 搜索 view tab: history must be empty for now
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const input = container.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+    act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(document.querySelectorAll('.dsh-music-qq-hist-item').length).toBe(0)
+    // wait for the slow prefs fetch + the prefsReady re-apply, then focus again
+    await act(async () => { await new Promise((r) => setTimeout(r, 160)) })
+    act(() => { input.dispatchEvent(new Event('focusin', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const histItems = [...document.querySelectorAll('.dsh-music-qq-hist-item')]
+    expect(histItems.some((b) => b.textContent === '刀郎')).toBe(true)
+  })
+
   it('starts a DIFFERENT track from 0 after refresh via the music_play intent (not the old position)', async () => {
     // Regression: after a refresh the player restores the last track PAUSED at its
     // saved position (restoredMusicPos). Switching to a different track via the
@@ -5058,7 +5117,7 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       // 切到「相关歌单」
-      const plTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '相关歌单')
+      const plTab = [...container.querySelectorAll('.dsh-music-qq-resulttab')].find((b) => b.textContent === '相关歌单')
       act(() => { plTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(container.textContent).toContain('搜索歌单甲')
