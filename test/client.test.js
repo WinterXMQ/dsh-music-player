@@ -2816,6 +2816,49 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricOnlineFixture = null }
   })
 
+  it('QRC 词级时间轴：karaoke 进入逐字点亮模式（data-wordmode），无词级行回落整行扫色', async () => {
+    // 行带 words（行内相对秒）→ fx 层标记 data-wordmode，渲染 N 个词 span，
+    // 初始类按 scan.elapsed 静态判定（jsdom 无 rAF 帧循环时的正确首帧）。
+    lyricOnlineFixture = {
+      ok: true, hasLyric: true, source: 'qq-qrc',
+      wordLines: [
+        { t: 0, end: 4, text: '你好世界', words: [
+          { text: '你', s: 0, d: 1 }, { text: '好', s: 1, d: 1 },
+          { text: '世', s: 2, d: 1 }, { text: '界', s: 3, d: 1 },
+        ] },
+        { t: 4, end: 8, text: '再见了朋友', words: [] },
+      ],
+    }
+    try {
+      const { container, audio } = await mountMusicFx({ fxPref: 'karaoke', localLrc: false })
+      audio.currentTime = 2.5   // 行内已过 2500ms：「你」「好」唱完、「世」正唱
+      act(() => { audio.emit('timeupdate') })
+      const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(fxEl.getAttribute('data-fx')).toBe('karaoke')
+      expect(fxEl.getAttribute('data-wordmode')).toBe('1')
+      // 整行渐变扫色变量不应出现（门控生效）
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('')
+      const spans = [...fxEl.querySelectorAll(':scope > .dsh-music-word')]
+      expect(spans.map((s2) => s2.textContent)).toEqual(['你', '好', '世', '界'])
+      expect(spans[0].classList.contains('done')).toBe(true)
+      expect(spans[1].classList.contains('done')).toBe(true)
+      expect(spans[2].classList.contains('act')).toBe(true)
+      expect(spans[2].classList.contains('done')).toBe(false)
+      expect(spans[3].classList.contains('done')).toBe(false)
+      expect(spans[3].classList.contains('act')).toBe(false)
+      // 词 span 文本拼接 = 整行文本（textContent 纯净性保持）
+      expect(fxEl.textContent).toBe('你好世界')
+
+      // 切到第二行（words=[] 空）→ 回落整行扫色：data-wordmode 消失、--kar-dur 出现
+      audio.currentTime = 5
+      act(() => { audio.emit('timeupdate') })
+      const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('再见了朋友')
+      expect(fxEl2.getAttribute('data-wordmode')).toBeNull()
+      expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('4000ms')
+    } finally { lyricOnlineFixture = null }
+  })
+
   it('falls back to the online lyric when a local track has no .lrc (no source badge)', async () => {
     // 本地无同名 .lrc（/lyric 返回 hasLrc:false）→ 客户端自动请求 /dsh-music/lyric/online
     // （Host 走 QQ → LRCLIB 兜底）；取到词后直接显示歌词，不显示歌词来源标识。

@@ -97,8 +97,8 @@ describe('qq.getQrcLyric（mock 网络层）', () => {
   const originalFetch = globalThis.fetch
   const okEnvelope = (dataObj) => new Response(JSON.stringify({ code: 0, req: { code: 0, data: dataObj } }), { status: 200, headers: { 'content-type': 'application/json' } })
 
-  it('qrc_t≠0 时返回秒时基的行窗口', async () => {
-    const cipher = QRC.encryptHex('<QrcInfos>\n[1500,2000]你好世界(1500,500)(2000,500)\n</QrcInfos>')
+  it('qrc_t≠0 时返回秒时基行窗口 + 词级时间轴（行内相对秒）', async () => {
+    const cipher = QRC.encryptHex('<QrcInfos>\n[1500,2000]你(1500,600)好(2100,700)世(2800,400)界(3200,300)\n</QrcInfos>')
     let capturedParam = null
     globalThis.fetch = async (_url, opts = {}) => {
       const body = JSON.parse(opts.body)
@@ -109,7 +109,15 @@ describe('qq.getQrcLyric（mock 网络层）', () => {
       const out = await QQ.getQrcLyric({ songid: 97773, interval: 269, title: '晴天', artist: '周杰伦', album: '叶惠美' }, '')
       expect(out.kind).toBe('qrc')
       expect(out.lines).toHaveLength(1)
-      expect(out.lines[0]).toEqual({ t: 1.5, end: 3.5, text: '你好世界' })
+      expect(out.lines[0]).toEqual({
+        t: 1.5, end: 3.5, text: '你好世界',
+        words: [
+          { text: '你', s: 0, d: 0.6 },
+          { text: '好', s: 0.6, d: 0.7 },
+          { text: '世', s: 1.3, d: 0.4 },
+          { text: '界', s: 1.7, d: 0.3 },
+        ],
+      })
       // 参数形态：数字 songID + base64 名字
       expect(capturedParam.songID).toBe(97773)
       expect(capturedParam.interval).toBe(269)
