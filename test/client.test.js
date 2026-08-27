@@ -4312,6 +4312,218 @@ describe('dsh-music-player client render smoke', () => {
     expect(audio.paused).toBe(false)
   })
 
+  it('restarts a restored online KuGou track from its saved mid-song position', async () => {
+    // 与 QQ 同构：Host prefs 里躺着一条「播到 1:00」的酷狗播放记录，新会话必须恢复
+    // 同一曲目 + 队列，点 ▶ 后把流 seek 到 60。
+    prefsServer = {
+      'dsh-music-kg-playback': JSON.stringify({
+        id: 'kg:ABC', name: '酷狗歌', artists: ['歌手'],
+        position: 60, duration: 240,
+        queue: [
+          { id: 'ABC', hash: 'ABC', title: '酷狗歌', artists: ['歌手'], source: 'kugou' },
+          { id: 'DEF', hash: 'DEF', title: '酷狗歌2', artists: ['歌手'], source: 'kugou' },
+        ],
+        source: '在线', ts: 999999999,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'kg' }),
+    }
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('酷狗歌')
+    // click play -> togglePlay reloads the KuGou stream URL and seeks to the saved spot
+    const playBtn = [...container.querySelectorAll('.dsh-music-bar-btn')].find((b) => b.title === '播放/暂停')
+    expect(playBtn).toBeTruthy()
+    act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const audio = audios[0]
+    expect(audio.src).toContain('/dsh-music/kg/play/ABC')
+    expect(audio.currentTime).toBeGreaterThanOrEqual(59.5) // 从 1:00 续播而非从头
+    expect(audio.paused).toBe(false)
+  })
+
+  it('restores KuGou playback over an older QQ record (newest timestamp wins)', async () => {
+    // 回归：之前播过 QQ（旧 ts），最近在播酷狗（新 ts）。刷新后必须恢复到酷狗，
+    // 而不是被旧 QQ 记录抢走（用户「播酷狗时刷新变回 QQ」的根因）。
+    prefsServer = {
+      'dsh-music-qq-playback': JSON.stringify({ id: 'qq:OLD789', name: '旧QQ歌', position: 10, duration: 100, queue: [{ songmid: 'OLD789', title: '旧QQ歌' }], source: '在线', ts: 100 }),
+      'dsh-music-kg-playback': JSON.stringify({
+        id: 'kg:NEWABC', name: '新酷狗歌', artists: ['歌手'],
+        position: 45, duration: 200,
+        queue: [{ id: 'NEWABC', hash: 'NEWABC', title: '新酷狗歌', artists: ['歌手'], source: 'kugou' }],
+        source: '在线', ts: 200,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'kg' }),
+    }
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 必须恢复到酷狗曲目，而不是旧 QQ 曲目
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan.textContent).toContain('新酷狗歌')
+    expect(nameSpan.textContent).not.toContain('旧QQ歌')
+  })
+
+  it('restores KuGou via saved scope even when an older QQ record has a newer timestamp (scope override)', async () => {
+    // 用户「播酷狗时刷新却恢复成 QQ」的场景：酷狗记录 ts 较小，但 scope 指示上次在
+    // 酷狗范畴（scope={kind:'kg'}）。修复后按 scope 优先恢复酷狗，而不是被 ts 更大的
+    // QQ 记录抢走。
+    prefsServer = {
+      'dsh-music-qq-playback': JSON.stringify({ id: 'qq:OLD789', name: '旧QQ歌', position: 10, duration: 100, queue: [{ songmid: 'OLD789', title: '旧QQ歌' }], source: '在线', ts: 999999 }),
+      'dsh-music-kg-playback': JSON.stringify({
+        id: 'kg:NEWABC', name: '新酷狗歌', artists: ['歌手'],
+        position: 45, duration: 200,
+        queue: [{ id: 'NEWABC', hash: 'NEWABC', title: '新酷狗歌', artists: ['歌手'], source: 'kugou' }],
+        source: '在线', ts: 1,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'kg' }),
+    }
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan.textContent).toContain('新酷狗歌')
+    expect(nameSpan.textContent).not.toContain('旧QQ歌')
+  })
+
+  it('persists online KuGou playback so a refresh can restore it (queue + position)', async () => {
+    // 模拟已登录酷狗：面板落到「我的歌单」→ 点开歌单 → 点歌播放。savePlayback 必须
+    // 把酷狗曲目+队列写入 dsh-music-kg-playback（与 QQ 同构）。
+    prefsServer = { 'dsh-music-scope': JSON.stringify({ kind: 'kg' }) }
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [{ id: 'p1', name: '我的酷狗歌单', creator: '我', trackCount: 2, source: 'kugou', cover: '' }] })
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 已登录 → 主 UI。点开「我的歌单」歌单卡片 → 歌单详情 → 点歌。
+    const plCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('我的酷狗歌单'))
+    expect(plCard).toBeTruthy()
+    act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('酷狗一号'))
+    expect(song).toBeTruthy()
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // savePlayback 持久化酷狗状态到 Host（debounce 后 flush）
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    const saved = JSON.parse(prefsServer['dsh-music-kg-playback'])
+    expect(saved).toBeTruthy()
+    expect(saved.id).toBe('kg:KG1')
+    expect(Array.isArray(saved.queue)).toBe(true)
+    expect(saved.queue.length).toBe(2)
+    expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('kg')
+  })
+
   it('starts a DIFFERENT track from 0 after refresh via the music_play intent (not the old position)', async () => {
     // Regression: after a refresh the player restores the last track PAUSED at its
     // saved position (restoredMusicPos). Switching to a different track via the
