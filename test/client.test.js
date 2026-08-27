@@ -2776,9 +2776,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2000ms')
   })
 
-  it('QRC 逐字歌词：karaoke 扫色窗口取精确行时长（长间奏不摊平），暂停冻结动画时钟', async () => {
+  it('QRC 行窗口：卡拉OK改音频时钟驱动——位置随 timeupdate 实时校准，间奏停满亮不摊平', async () => {
     // /lyric 无本地 .lrc → 在线兜底返回 qq-qrc 的精确行窗口 [{t,end,text}]。
-    // 行 2 结束后到音频结束是「长间奏」：旧行为会把整个剩余时长当窗口拖慢扫速。
+    // 扫色不再用墙钟 CSS 动画（挂载锚定会因起播缓冲/卡顿漂移），而是每次
+    // timeupdate 按 audio.currentTime 直写 background-position-x + 短过渡。
     lyricOnlineFixture = {
       ok: true, hasLyric: true, source: 'qq-qrc',
       wordLines: [
@@ -2792,26 +2793,33 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { audio.emit('timeupdate') })
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第一句歌词')
       let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
-      // 行窗口 [0,4.5]s → 真实时长 4500ms（不是下一间隔、也不是估算值）
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4500ms')
-      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+      // 音频时钟模式生效：无 --kar-dur 动画变量，标记 data-audioclock；行起点 → 100%
+      expect(fxEl.getAttribute('data-audioclock')).toBe('1')
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('')
+      expect(fxEl.style.backgroundPositionX).toBe('100.00%')
 
+      // 行内进度：7s，第二行 [4.5,9]s 已过 2.5/4.5 → 位置 (1-5/9)=44.44%
       audio.currentTime = 7
       act(() => { audio.emit('timeupdate') })
       fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4500ms')
-      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2500ms')
+      expect(fxEl.style.backgroundPositionX).toBe('44.44%')
 
-      // 末行唱完后（9~20s 长间奏）：行保持显示，但窗口仍 4500ms —— 不被摊平
+      // 行内 seek 漂移修正：直接跳到行尾附近，下一拍立即对齐（旧墙钟动画做不到）
+      audio.currentTime = 8.8
+      act(() => { audio.emit('timeupdate') })
+      fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(fxEl.style.backgroundPositionX).toBe('4.44%')   // (1 - 4300/4500)
+
+      // 末行唱完后（9~20s 长间奏）：行保持显示、扫色停在满亮 0% —— 不摊平不重跑
       audio.currentTime = 12
       act(() => { audio.emit('timeupdate') })
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
       const el = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(el.getAttribute('data-fx')).toBe('karaoke')
-      // 文本未变 → 不重挂 → 扫色停在已完成的满亮态，不会重新快跑一遍
+      expect(el.style.backgroundPositionX).toBe('0.00%')
 
-      // 暂停：fx 层挂 fxfrozen 类冻结动画时钟；恢复播放时移除
+      // 暂停：fx 层仍挂 fxfrozen 类（跑马灯/入场动画时钟冻结）
       act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(container.querySelector('.dsh-music-bar-lyric-fx').classList.contains('fxfrozen')).toBe(true)
@@ -2840,14 +2848,15 @@ describe('dsh-music-player client render smoke', () => {
       expect(fxEl.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl.textContent).toBe('你好世界')
       expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
-      // 整行渐变扫色变量正常出现
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('4000ms')
+      // 音频时钟模式：行 [0,4]s 已过 2.5s → 位置 (1-2500/4000)=37.50%
+      expect(fxEl.getAttribute('data-audioclock')).toBe('1')
+      expect(fxEl.style.backgroundPositionX).toBe('37.50%')
 
       audio.currentTime = 5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('再见了朋友')
-      expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('4000ms')
+      expect(fxEl2.style.backgroundPositionX).toBe('75.00%')   // 行 [4,8]s 过 1s
     } finally { lyricOnlineFixture = null }
   })
 
@@ -3814,26 +3823,24 @@ describe('dsh-music-player client render smoke', () => {
       const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
       act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 行窗口 [0,3]s → 整行扫色 --kar-dur 3000ms（精确行时长）。
-      // 注意扫色 delay 只在「换行重挂」时计算（中途改 CSS delay 会重启动画闪帧，
-      // 这是既定取舍）：先在行起点校准，再跨行验证负延迟对准。
+      // 行窗口 [0,3]s → 音频时钟驱动：1.2s 处位置 (1-1200/3000)=60.00%
       audio.duration = 30
-      audio.currentTime = 0
+      audio.currentTime = 1.2
       act(() => { audio.emit('timeupdate') })
       const outer = container.querySelector('.dsh-music-bar-lyric')
       expect(outer.getAttribute('data-src')).toBe('qq-qrc')
       const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(fxEl.getAttribute('data-wordmode')).toBeNull()
       expect(fxEl.textContent).toBe('告白气球')
-      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('3000ms')
-      expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+      expect(fxEl.getAttribute('data-audioclock')).toBe('1')
+      expect(fxEl.style.backgroundPositionX).toBe('60.00%')
       expect(fxEl.querySelectorAll('.dsh-music-word').length).toBe(0)
-      // 第二行窗口 [3,6]s：换行重挂 → 负延迟对准行内已过时间（4.5−3=1500ms）
+      // 第二行窗口 [3,6]s：4.5s → 50.00%
       audio.currentTime = 4.5
       act(() => { audio.emit('timeupdate') })
       const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('亲爱的 爱上你')
-      expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('3000ms')
-      expect(fxEl2.style.getPropertyValue('--kar-delay')).toBe('-1500ms')
+      expect(fxEl2.style.backgroundPositionX).toBe('50.00%')
     } finally {
       qqLyricFixture = null
       prefsServer = {}
