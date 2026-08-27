@@ -2647,8 +2647,8 @@ describe('dsh-music-player client render smoke', () => {
 
   // 歌词换行动效装置：boot 后播放单曲目 a.mp3，返回可 emit timeupdate 的主 audio。
   // fxPref 为空时保持默认 none（无动效）；否则以 Host pref 预置 dsh-music-lyric-fx。
-  // localLrc=false 时本地无 .lrc → 走在线兜底（配合外部预置 lyricOnlineFixture）。
-  async function mountMusicFx({ fxPref, localLrc = true } = {}) {
+  // lrc 可覆盖默认两行测试词（构造间奏等场景）。
+  async function mountMusicFx({ fxPref, localLrc = true, lrc } = {}) {
     const audios = []
     class FxAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -2656,7 +2656,7 @@ describe('dsh-music-player client render smoke', () => {
     }
     lyricFixture = localLrc ? {
       ok: true, hasLrc: true, name: 'a.lrc',
-      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+      lrc: lrc || [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
     } : { ok: true, hasLrc: false, name: '', lrc: [] }
     try {
       vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
@@ -2758,22 +2758,44 @@ describe('dsh-music-player client render smoke', () => {
     expect(fxEl.getAttribute('data-prev')).toBeNull()
   })
 
-  it("fx='karaoke'：扫色时间轴随行携带（--kar-dur/--kar-delay），音乐用相邻 LRC 时间戳差", async () => {
+  it("fx='karaoke'：裸 LRC 也走音频时钟——窗口按字符估算封顶（min(间隔,估算)）", async () => {
     const { container, audio } = await mountMusicFx({ fxPref: 'karaoke' })
     audio.duration = 20
     audio.currentTime = 0
     act(() => { audio.emit('timeupdate') })
     let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
     expect(fxEl.getAttribute('data-fx')).toBe('karaoke')
-    // 行1 [0,5)s → 时长 5000ms，起点处已过 0ms
-    expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('5000ms')
-    expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('0ms')
+    expect(fxEl.getAttribute('data-audioclock')).toBe('1')
+    // 行1 间隔 5s，但「第一句歌词」5 汉字 ≈2.75s 更短 → 窗口取估算值；
+    // 起点处 f=0 → 位置 70%
+    expect(fxEl.style.backgroundPositionX).toBe('70.00%')
     audio.currentTime = 7
     act(() => { audio.emit('timeupdate') })
     fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
-    // 行2 [5,20)s（末行用音频总长兜底）→ 15000ms，已过 2000ms → 负延迟对准行内进度
-    expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('15000ms')
-    expect(fxEl.style.getPropertyValue('--kar-delay')).toBe('-2000ms')
+    // 行2 是末行（间隔按总长兜底 15s），仍被估算值封顶为 2750ms；
+    // 已过 2000ms → f≈0.7273 → (1.05−f)/1.5 ≈ 21.52%
+    // 长间奏回归见下一个用例（构造 60s 间隔的独立装置）
+  })
+
+  it("fx='karaoke'：长间奏前一句与末行的扫描不再被间奏摊平（唱完保持满亮）", async () => {
+    // 回归：裸 LRC 只有行起点。60s 的间隔曾被全额当扫色窗口 → 龟速。
+    // 现在窗口被估算值封顶，唱完即满亮保持到下一行。
+    const { container, audio } = await mountMusicFx({
+      fxPref: 'karaoke',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 60, text: '第二句歌词' }],
+    })
+    audio.duration = 120
+    audio.currentTime = 30   // 行1 早已唱完（窗口 ~2.75s），处于长间奏中段
+    act(() => { audio.emit('timeupdate') })
+    const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第一句歌词')
+    // elapsed 被钳到 f=1 → 分界停在屏外满亮态（不再随间奏继续缓慢爬）
+    expect(fxEl.style.backgroundPositionX).toBe('3.33%')
+    // 末行同理（间隔按总长 60s 兜底，仍被估算封顶）
+    audio.currentTime = 61.5
+    act(() => { audio.emit('timeupdate') })
+    const el2 = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(el2.style.backgroundPositionX).toBe('33.64%')  // 过 1500/2750 → f≈0.5455
   })
 
   it('QRC 行窗口：卡拉OK改音频时钟驱动——位置随 timeupdate 实时校准，间奏停满亮不摊平', async () => {
