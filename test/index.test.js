@@ -1239,6 +1239,8 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
       const body = JSON.parse(res.body)
       expect(body.ok).toBe(true)
       expect(body.source).toBe('qq-qrc')
+      // 词尾收紧以原行尾为上界：这里词尾(+尾巴)=2600ms ≥ 原行尾 2500ms → 窗口不变；
+      // 若词尾早于行尾（真实长间奏数据）则被收紧到词尾+400ms。
       expect(body.wordLines).toEqual([{ t: 0.5, end: 2.5, text: '你好世' }])
       expect(stub.calls.qqSongInfo).toBe(1)
       expect(stub.calls.qqQrc).toBe(1)
