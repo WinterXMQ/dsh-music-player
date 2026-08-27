@@ -3777,6 +3777,70 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('shows the KG quality tier via startPlay/下一首 (HEAD re-probe)', async () => {
+    // Regression: KG 曲目经 startPlay（自动续播/上下曲）与刷新恢复续播时原本不发
+    // HEAD 探测，音质徽章只显示「酷狗音乐」；startPlay 必须补一次 HEAD（与 QQ 同款）。
+    const baseFetch = fetchStub
+    const headLog = []
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      const o = opts || {}
+      if (u.startsWith('/dsh-music/kg/play/') && o.method === 'HEAD') {
+        headLog.push(u)
+        return Promise.resolve({ ok: true, status: 200, headers: { get: (n) => n === 'X-DSH-KG-Quality' ? encodeURIComponent('无损') : null } })
+      }
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [{ id: 'p1', name: '我的酷狗歌单', creator: '我', trackCount: 2, source: 'kugou', cover: '' }] })
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const plCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('我的酷狗歌单'))
+    act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('酷狗一号'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 直接点歌 → startKGPlayback → HEAD 探测 → 徽标带品质标签
+    expect(container.textContent).toContain('酷狗音乐 · 无损')
+    // 点「下一首」→ step → startPlay（通用路径）→ 必须为 KG2 再发一次 HEAD
+    const nextBtn = container.querySelector('button[title="下一首"]')
+    act(() => { nextBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(headLog).toContain('/dsh-music/kg/play/KG2')
+    expect(container.textContent).toContain('酷狗音乐 · 无损')
+  })
+
   it('shows the local music quality chip (FLAC · 无损) on the bar', async () => {
     // 本地音乐：扫描时解析文件头得到「格式 · 档位」，startPlay 把 track.quality 写入
     // currentQuality，播放条显示品质芯片；与在线 QQ 的「QQ音乐 · 无损」互不叠加。
