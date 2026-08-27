@@ -196,6 +196,7 @@ describe('getOnlineLyric (QQ → LRCLIB 兜底)', () => {
     const hit = await getOnlineLyric({ title: '七里香' })
     expect(hit).not.toBeNull()
     expect(hit.source).toBe('lrclib')
-    expect(callLog.length).toBe(2) // QQ 搜索失败后仍尝试 LRCLIB
+    // QQ 搜索失败后仍依次尝试 酷狗（songsearch.kugou.com）→ LRCLIB，链路不被单个源拖垮
+    expect(callLog.length).toBe(3)
   })
 })

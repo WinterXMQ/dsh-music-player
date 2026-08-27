@@ -2934,10 +2934,13 @@ describe('dsh-music-player client render smoke', () => {
     // not logged in: only the two centered login buttons, no search/sub-tabs
     expect(container.textContent).toContain('QQ 登录')
     expect(container.textContent).toContain('微信登录')
-    expect(container.querySelector('.dsh-music-qq-input')).toBeNull()
-    expect(container.querySelector('.dsh-music-qq-viewtabs')).toBeNull()
+    // 酷狗面板（第二个 .dsh-music-qq-pane，常驻渲染）也有登录按钮，断言需收窄到
+    // 第一个 pane（QQ）内，否则会数到酷狗的「生成酷狗登录二维码」按钮。
+    const qqPane = [...container.querySelectorAll('.dsh-music-qq-pane')][0]
+    expect(qqPane.querySelector('.dsh-music-qq-input')).toBeNull()
+    expect(qqPane.querySelector('.dsh-music-qq-viewtabs')).toBeNull()
     // both login buttons are the enlarged login-btn style and carry a risk disclaimer
-    const btns = [...container.querySelectorAll('.dsh-music-qq-login-btn')]
+    const btns = [...qqPane.querySelectorAll('.dsh-music-qq-login-btn')]
     expect(btns.length).toBe(2)
     expect(container.querySelector('.dsh-music-qq-login-warn')).toBeTruthy()
     expect(container.textContent).toContain('使用声明')
