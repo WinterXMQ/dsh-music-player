@@ -4188,8 +4188,7 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // savePlayback must persist the online QQ state to the Host (flushed on debounce)
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
-    const saved = JSON.parse(prefsServer['dsh-music-playback'])
-    expect(saved.kind).toBe('qq')
+    const saved = JSON.parse(prefsServer['dsh-music-qq-playback'])
     expect(saved.id).toBe('qq:789')
     expect(Array.isArray(saved.queue)).toBe(true)
     expect(saved.queue.length).toBe(2)
@@ -4246,8 +4245,7 @@ describe('dsh-music-player client render smoke', () => {
     audio.duration = 240
     act(() => { audio.emit('pause') })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // flush debounce
-    const saved = JSON.parse(prefsServer['dsh-music-playback'])
-    expect(saved.kind).toBe('qq')
+    const saved = JSON.parse(prefsServer['dsh-music-qq-playback'])
     expect(saved.id).toBe('qq:789')
     expect(saved.position).toBe(60)
     expect(saved.duration).toBe(240)
@@ -4258,8 +4256,8 @@ describe('dsh-music-player client render smoke', () => {
     // 模拟重启：Host prefs 里躺着一条「播到 1:00」的 QQ 播放记录。新会话必须恢复
     // 同一曲目 + 队列，播放条显示 1:00 / 4:00（暂停态），点 ▶ 后把流 seek 到 60。
     prefsServer = {
-      'dsh-music-playback': JSON.stringify({
-        kind: 'qq', id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
+      'dsh-music-qq-playback': JSON.stringify({
+        id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
         position: 60, duration: 240,
         queue: [
           { id: '789', songmid: '789', title: '告白气球', artists: ['周杰伦'], payplay: 0, source: 'qq' },
@@ -4503,8 +4501,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // flush debounce
 
-    const saved = JSON.parse(prefsServer['dsh-music-playback'])
-    expect(saved.kind).toBe('qq')
+    const saved = JSON.parse(prefsServer['dsh-music-qq-playback'])
     expect(saved.queue.length).toBe(800)
     // the large body must NOT use keepalive (browser would throw >64KiB)
     const playbackPost = prefsPostOpts.find((o) => o.bodyLen > 60 * 1024)
@@ -4573,8 +4570,8 @@ describe('dsh-music-player client render smoke', () => {
     // 返回重进（openQueue）重新读取已就绪的队列才正常。
     prefsServer = {
       'dsh-music-qq-ui': JSON.stringify({ layer: 'playlist', plId: '', plName: '' }),
-      'dsh-music-playback': JSON.stringify({
-        kind: 'qq', id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
+      'dsh-music-qq-playback': JSON.stringify({
+        id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
         position: 10, duration: 240,
         queue: [
           { id: '789', songmid: '789', title: '告白气球', artists: ['周杰伦'], payplay: 0, source: 'qq' },
@@ -4619,6 +4616,63 @@ describe('dsh-music-player client render smoke', () => {
     // 恢复的「在线播放列表」应显示保存的队列歌曲，而不是「暂无歌曲」
     const songRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
     expect(songRow).toBeTruthy()
+    expect(container.textContent).not.toContain('暂无歌曲。')
+  })
+
+  it('shows the persisted online QQ queue even when the refresh restored local music (separate persistence)', async () => {
+    // 核心场景：上次播的是本地音乐（本地 ts 最新），但 QQ 队列仍单独保存在
+    // dsh-music-qq-playback。刷新后 restoreLatest 恢复本地，打开「在线播放列表」
+    // 仍能看到之前保存的 QQ 队列——本地/在线互不影响、互不覆盖。
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-qq-playback': JSON.stringify({
+        id: 'qq:789', name: '告白气球', artists: ['周杰伦'],
+        position: 10, duration: 240,
+        queue: [
+          { id: '789', songmid: '789', title: '告白气球', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+          { id: '790', songmid: '790', title: '七里香', artists: ['周杰伦'], payplay: 0, source: 'qq' },
+        ],
+        source: '在线', ts: 100,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    }
+    manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.mp3', url: '/dsh-music/0', size: 10, ext: 'mp3', path: '/music/a.mp3' }] }
+    qqLoggedIn = true
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 刷新恢复了本地音乐（本地 ts 最新 → 恢复本地，tab 停在本地音乐）
+    expect(container.querySelector('.dsh-music-tab.active').textContent).toBe('本地音乐')
+    // 打开 QQ 面板 → 点「播放列表」打开「在线播放列表」→ 仍能看到持久化的 QQ 队列
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const plBtn = [...container.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '播放列表')
+    expect(plBtn).toBeTruthy()
+    act(() => { plBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 显示持久化的 QQ 队列，而不是「暂无歌曲」
+    const qqSongRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+    expect(qqSongRow).toBeTruthy()
     expect(container.textContent).not.toContain('暂无歌曲。')
   })
 

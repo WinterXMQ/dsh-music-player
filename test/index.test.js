@@ -379,6 +379,7 @@ describe('dsh-music-player host routes', () => {
           'dsh-music-lyric-fx': 'karaoke',
           'dsh-music-show-quality': '0',
           'dsh-music-show-bar-bg': '0',
+          'dsh-music-qq-playback': JSON.stringify({ id: 'qq:1', queue: [] }),
           'dsh-music-lyric-marquee': '0',
           'dsh-music-lyric-mask': '1',
         } }) }),
@@ -389,6 +390,7 @@ describe('dsh-music-player host routes', () => {
       expect(d.prefs['dsh-music-lyric-fx']).toBe('karaoke')
       expect(d.prefs['dsh-music-show-quality']).toBe('0')
       expect(d.prefs['dsh-music-show-bar-bg']).toBe('0')
+      expect(d.prefs['dsh-music-qq-playback']).toBe(JSON.stringify({ id: 'qq:1', queue: [] }))
       expect('dsh-music-lyric-marquee' in d.prefs).toBe(false) // 已下线的配置键
       expect('dsh-music-lyric-mask' in d.prefs).toBe(false)
       // 非法 fx 枚举值丢弃
