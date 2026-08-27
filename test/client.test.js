@@ -3211,6 +3211,80 @@ describe('dsh-music-player client render smoke', () => {
     expect([...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].some((b) => b.textContent === '加载更多')).toBe(false)
   })
 
+  it('loads more KG 排行榜 songs via the 加载更多 button (append + hasMore)', async () => {
+    // UI 层回归：排行榜详情顶部已渲染「加载更多」按钮（gated on topHasMore），
+    // 旧代码因 host 端 total 塌成当前页长度（见 kugou-toplist.test.js）导致
+    // topHasMore 恒 false，按钮永不出现。这里用正确 total=5 验证按钮出现、
+    // 点击追加下一页、末页后消失。
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/top-lists') return jsonRes({ ok: true, groups: [{ id: '', name: '热门榜单', toplists: [{ id: '8888', name: '飙升榜', cover: '' }] }] })
+      if (u.includes('/dsh-music/kg/top-songs')) {
+        const offset = parseInt(new URL('http://x' + u).searchParams.get('offset') || '0', 10)
+        const all = ['飙升歌一', '飙升歌二', '飙升歌三', '飙升歌四', '飙升歌五']
+        const page = all.slice(offset, offset + 2).map((title, i) => ({ id: 'kg' + (offset + i), hash: String(offset + i).padStart(32, '0'), title, artists: ['歌手'], source: 'kugou' }))
+        return jsonRes({ ok: true, toplist: { id: '8888', name: '飙升榜', total: all.length, hasMore: offset + page.length < all.length, songs: page } })
+      }
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const topsTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '排行榜')
+    act(() => { topsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升榜')
+    const card = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('飙升榜'))
+    act(() => { card.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 第一页：2 首 + 总数 5 + 出现「加载更多」
+    expect(container.textContent).toContain('飙升歌一')
+    expect(container.textContent).toContain('飙升歌二')
+    expect(container.textContent).toContain('2 / 5 首')
+    const moreBtn = [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].find((b) => b.textContent === '加载更多')
+    expect(moreBtn).toBeTruthy()
+    // 点加载更多 → 追加下一页
+    act(() => { moreBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升歌三')
+    expect(container.textContent).toContain('飙升歌四')
+    expect(container.textContent).toContain('4 / 5 首')
+    // 再点 → 最后一首，hasMore=false 后按钮消失
+    const moreBtn2 = [...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].find((b) => b.textContent === '加载更多')
+    expect(moreBtn2).toBeTruthy()
+    act(() => { moreBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.textContent).toContain('飙升歌五')
+    expect(container.textContent).toContain('5 / 5 首')
+    expect([...container.querySelectorAll('.dsh-music-qq-loadmore-btn')].some((b) => b.textContent === '加载更多')).toBe(false)
+  })
+
   it('loads more recommended playlists via the 加载更多 button (deduped append)', async () => {
     qqLoggedIn = true
     // category 页返回不同的歌单（每次翻页返回 catN），用于验证追加。
