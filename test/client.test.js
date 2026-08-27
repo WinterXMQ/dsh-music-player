@@ -3768,6 +3768,47 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('FLAC · 无损')
   })
 
+  it('adds the bare class to the bar (hides border/background) when the 播放条背景显示 toggle is off, keeping content', async () => {
+    // 系统配置「播放条背景显示」：关闭后播放条外壳去掉边框与背景（加 .bare class），
+    // 但歌名/歌词等内容保持不变（仍是同一 .dsh-music-bar 的子元素）。
+    manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损' }] }
+    prefsServer = {}
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.flac'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 默认开启：播放条无 bare class，歌名正常显示
+    let barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl.classList.contains('bare')).toBe(false)
+    expect(barEl.textContent).toContain('a')
+    // 打开系统配置 → 关闭「播放条背景显示」
+    const configTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置')
+    act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
+    // 第 5 个开关 = 播放条背景显示（位于进度条之后）
+    expect(toggles[4].getAttribute('aria-checked')).toBe('true')
+    act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 返回播放条：bare class 加上，内容（歌名）仍保留
+    const libraryTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
+    act(() => { libraryTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    barEl = container.querySelector('.dsh-music-bar')
+    expect(barEl.classList.contains('bare')).toBe(true)
+    expect(barEl.textContent).toContain('a')
+  })
+
   it('shows the QQ online lyric in the bar (idle state) with translation merged', async () => {
     // P2：在线 QQ 歌词。QQ 播放走 startQQPlayback（不走 startPlay），歌词从
     // /dsh-music/qq/lyric 按 songmid 取；有逐句翻译时合并为「原文 ／ 翻译」。
@@ -5394,14 +5435,15 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // four toggle rows (歌词显示 / 频谱显示 / 进度条显示 / 音质徽章显示)，默认全开；
+    // five toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，默认全开；
     // 跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    expect(toggles.length).toBe(4)
+    expect(toggles.length).toBe(5)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
     expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
     expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
+    expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
     // 歌词动效分段选择器：五个选项，默认 none（无动效）选中
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -5419,6 +5461,8 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // turn OFF the quality toggle
     act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the bar-bg toggle
+    act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
     expect(lyricPost).toBeTruthy()
@@ -5432,6 +5476,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(qualityPost).toBeTruthy()
     expect(qualityPost.prefs['dsh-music-show-quality']).toBe('0')
     expect(prefsServer['dsh-music-show-quality']).toBe('0')
+    const barBgPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-bar-bg'])
+    expect(barBgPost).toBeTruthy()
+    expect(barBgPost.prefs['dsh-music-show-bar-bg']).toBe('0')
+    expect(prefsServer['dsh-music-show-bar-bg']).toBe('0')
 
     // 歌词显示关闭 → 动效配置行联动隐藏；重新打开后恢复，且保留刚才选的 karaoke。
     expect(container.querySelectorAll('.dsh-music-config-seg-btn').length).toBe(0)
@@ -5442,7 +5490,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
-    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0' }
+    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0', 'dsh-music-show-bar-bg': '0' }
     vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     await bootClient()
     const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -5460,6 +5508,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
     expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // quality restored OFF
     expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // progress restored OFF
+    expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
