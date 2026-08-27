@@ -11,6 +11,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, statSync, readFileS
 import { deflateRawSync } from 'node:zlib'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import * as QRC from '../lib/qrc.js'
 
 import {
   apply, parseBookStructure, splitBookChunks, parseLrc, MAX_TTS_CHARS,
@@ -1184,9 +1185,9 @@ describe('dsh-music-player /lyric route', () => {
 
 describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底)', () => {
   // 按 URL 分发的 fetch stub：QQ 搜索 / QQ 歌词 / LRCLIB 搜索，并记录调用次数。
-  function makeStub({ qqSearch = [], qqLyric = null, lrclib = [] }) {
-    const calls = { qqSearch: 0, qqLyric: 0, lrclib: 0 }
-    const fn = async (url) => {
+  function makeStub({ qqSearch = [], qqLyric = null, lrclib = [], qqSongInfo = null, qqQrc = null }) {
+    const calls = { qqSearch: 0, qqLyric: 0, lrclib: 0, qqSongInfo: 0, qqQrc: 0 }
+    const fn = async (url, opts = {}) => {
       const u = String(url)
       if (u.includes('c.y.qq.com/soso/fcgi-bin/client_search_cp')) {
         calls.qqSearch++
@@ -1200,6 +1201,18 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
         calls.lrclib++
         return { ok: true, status: 200, json: async () => lrclib }
       }
+      if (u.includes('fcg_play_single_song.fcg')) {
+        calls.qqSongInfo++
+        return { ok: true, status: 200, json: async () => (qqSongInfo === null ? { code: 0, data: [] } : { code: 0, data: [qqSongInfo] }) }
+      }
+      if (u.includes('musicu.fcg')) {
+        // 只服务 GetPlayLyricInfo；其它模块调用视为意外（防止误接上游）。
+        let module_ = ''
+        try { module_ = JSON.parse(opts.body).req.module } catch {}
+        if (module_ !== 'music.musichallSong.PlayLyricInfo') throw new Error('unexpected musicu module: ' + module_)
+        calls.qqQrc++
+        return { ok: true, status: 200, json: async () => (qqQrc || { code: 0, req: { code: 0, data: {} } }) }
+      }
       throw new Error('unexpected stub url: ' + u)
     }
     fn.calls = calls
@@ -1207,6 +1220,84 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
   }
   const qqSong = (songmid, title, artist, interval) => ({ songmid, songname: title, singer: [{ name: artist }], interval, payplay: 0 })
   const lrclibRec = (id, trackName, artistName, duration, syncedLyrics) => ({ id, trackName, artistName, duration, instrumental: false, syncedLyrics })
+  // QRC 单曲信息桩（fcg_play_single_song.fcg 响应形态）
+  const songInfo = (id, name, artist, interval) => ({ id, mid: 'S1', name, interval, singer: [{ name: artist }], album: { name: '专辑' } })
+
+  it('qq/lyric prefers word-level QRC (songmid→数字ID→GetPlayLyricInfo) and returns wordLines', async () => {
+    const { handler, cleanup } = boot()
+    const qrcText = '<QrcInfos>\n[500,2000]你(500,700)好(1200,600)世(1800,400)\n</QrcInfos>'
+    const stub = makeStub({
+      qqSongInfo: songInfo(97773, '晴天', '周杰伦', 269),
+      qqQrc: { code: 0, req: { code: 0, data: { lyric: QRC.encryptHex(qrcText), qrc_t: 1761231326, lrc_t: 0, trans: '', trans_t: 0 } } },
+      qqLyric: { retcode: 0, lyric: '[00:01.00]不该走LRC\n' }, // 不应被用到
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.source).toBe('qq-qrc')
+      expect(body.wordLines).toEqual([{ t: 0.5, end: 2.5, text: '你好世', words: [
+        { text: '你', s: 0, d: 0.7 },
+        { text: '好', s: 0.7, d: 0.6 },
+        { text: '世', s: 1.3, d: 0.4 },
+      ] }])
+      expect(stub.calls.qqSongInfo).toBe(1)
+      expect(stub.calls.qqQrc).toBe(1)
+      expect(stub.calls.qqLyric).toBe(0)
+
+      // 第二次请求同一首歌：mid→ID 已缓存（不再打单曲详情），但歌词仍实时解密
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res2)
+      expect(JSON.parse(res2.body).source).toBe('qq-qrc')
+      expect(stub.calls.qqSongInfo).toBe(1)
+      expect(stub.calls.qqQrc).toBe(2)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('qq/lyric falls back to plain LRC when the song has no word data (qrc_t=0)', async () => {
+    const { handler, cleanup } = boot()
+    const stub = makeStub({
+      qqSongInfo: songInfo(449205, '稻香', '周杰伦', 223),
+      qqQrc: { code: 0, req: { code: 0, data: { lyric: 'aabbccdd00112233'.repeat(50), qrc_t: 0, lrc_t: 1728477663 } } }, // 加密数据但无逐字
+      qqLyric: { retcode: 0, lyric: '[00:01.00]对这个世界如果你有太多的抱怨\n', trans: '' },
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.source).toBeUndefined()         // 走了旧形态（无 source 字段）
+      expect(body.lrc[0].text).toContain('太多的抱怨')
+      expect(stub.calls.qqLyric).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('qq/lyric falls back to plain LRC when songmid cannot resolve to a numeric id', async () => {
+    const { handler, cleanup } = boot()
+    const stub = makeStub({
+      qqSongInfo: null,                           // fcg 端点返回空 data → 解析失败
+      qqLyric: { retcode: 0, lyric: '[00:01.00]跌落谷底也不失意\n', trans: '' },
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=UNKNOWN' }), res)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.lrc[0].text).toContain('不失意')
+      expect(stub.calls.qqSongInfo).toBe(1)
+      expect(stub.calls.qqQrc).toBe(0)            // 无数字 ID → 不该发起 QRC 请求
+      // 失败结果已缓存：再来一次不重试 fcg
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=UNKNOWN' }), res2)
+      expect(JSON.parse(res2.body).ok).toBe(true)
+      expect(stub.calls.qqSongInfo).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
 
   it('returns 400 for a missing path and 403 for an unregistered path', async () => {
     const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })

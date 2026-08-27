@@ -3769,6 +3769,92 @@ describe('dsh-music-player client render smoke', () => {
     } finally { qqLyricFixture = null }
   })
 
+  it('QQ 在线歌曲也走 QRC 逐字歌词：karaoke 下进入 wordmode 渲染', async () => {
+    // /dsh-music/qq/lyric 返回 wordLines 形态 → loadQQLyric 消费 musicWordLyric，
+    // karaoke 动效下 fx 层标记 data-wordmode 并渲染词 span；data-src="qq-qrc"。
+    const audios = []
+    class QrcAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest(); qqLoggedIn = true
+    prefsServer = { 'dsh-music-lyric-fx': 'karaoke' }
+    qqLyricFixture = {
+      ok: true, hasLyric: true, source: 'qq-qrc',
+      wordLines: [
+        { t: 0, end: 3, text: '告白气球', words: [
+          { text: '告', s: 0, d: 0.75 }, { text: '白', s: 0.75, d: 0.75 },
+          { text: '气', s: 1.5, d: 0.75 }, { text: '球', s: 2.25, d: 0.75 },
+        ] },
+        { t: 3, end: 6, text: '亲爱的 爱上你', words: [] },
+      ],
+    }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', QrcAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 行内进度 1.2s：「告」唱完、「白」正唱
+      audio.duration = 30
+      audio.currentTime = 1.2
+      act(() => { audio.emit('timeupdate') })
+      const outer = container.querySelector('.dsh-music-bar-lyric')
+      expect(outer.getAttribute('data-src')).toBe('qq-qrc')
+      const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(fxEl.getAttribute('data-wordmode')).toBe('1')
+      expect(fxEl.style.getPropertyValue('--kar-dur')).toBe('') // 整行渐变被门控
+      const spans = [...fxEl.querySelectorAll(':scope > .dsh-music-word')]
+      expect(spans.map((s2) => s2.textContent)).toEqual(['告', '白', '气', '球'])
+      expect(spans[0].classList.contains('done')).toBe(true)
+      expect(spans[1].classList.contains('act')).toBe(true)
+      // 无词级行回落整行扫色
+      audio.currentTime = 4.5
+      act(() => { audio.emit('timeupdate') })
+      const fxEl2 = container.querySelector('.dsh-music-bar-lyric-fx')
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('亲爱的 爱上你')
+      expect(fxEl2.getAttribute('data-wordmode')).toBeNull()
+      expect(fxEl2.style.getPropertyValue('--kar-dur')).toBe('3000ms')
+    } finally {
+      qqLyricFixture = null
+      prefsServer = {}
+    }
+  })
+
   it('clears the QQ artist from the bar when switching to a local track or novel', async () => {
     // Regression: after playing a QQ song (artists set), playing a local track
     // (no artists) or a novel used to leave the stale QQ artist on the bar,
