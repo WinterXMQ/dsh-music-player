@@ -2777,25 +2777,34 @@ describe('dsh-music-player client render smoke', () => {
     // 长间奏回归见下一个用例（构造 60s 间隔的独立装置）
   })
 
-  it("fx='karaoke'：长间奏前一句与末行的扫描不再被间奏摊平（唱完保持满亮）", async () => {
-    // 回归：裸 LRC 只有行起点。60s 的间隔曾被全额当扫色窗口 → 龟速。
-    // 现在窗口被估算值封顶，唱完即满亮保持到下一行。
+  it("fx='karaoke'：长间奏前一句与末行——唱完满亮一小会后歌词消隐（不再挂到下一句）", async () => {
+    // 回归：裸 LRC 只有行起点。60s 的间隔曾被全额当扫色窗口 → 龟速；
+    // 随后音频时钟+封顶解决摊平，但整句仍显示到下一句才开始。现在：
+    // 窗口内正常扫色（估算封顶）→ 唱完且静默 >1.2s → 歌词消失。
     const { container, audio } = await mountMusicFx({
       fxPref: 'karaoke',
       lrc: [{ t: 0, text: '第一句歌词' }, { t: 60, text: '第二句歌词' }],
     })
     audio.duration = 120
-    audio.currentTime = 30   // 行1 早已唱完（窗口 ~2.75s），处于长间奏中段
+    audio.currentTime = 1.5   // 行1 窗口内（~2.75s）：正常扫色
     act(() => { audio.emit('timeupdate') })
-    const fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
     expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第一句歌词')
-    // elapsed 被钳到 f=1 → 分界停在屏外满亮态（不再随间奏继续缓慢爬）
-    expect(fxEl.style.backgroundPositionX).toBe('3.33%')
-    // 末行同理（间隔按总长 60s 兜底，仍被估算封顶）
-    audio.currentTime = 61.5
+    expect(fxEl.style.backgroundPositionX).toBe('33.64%')   // f=1500/2750 → (1.05−f)/1.5
+
+    audio.currentTime = 30   // 行1 已唱完很久、处于长间奏中段 → 歌词应已消失
     act(() => { audio.emit('timeupdate') })
-    const el2 = container.querySelector('.dsh-music-bar-lyric-fx')
-    expect(el2.style.backgroundPositionX).toBe('33.64%')  // 过 1500/2750 → f≈0.5455
+    expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
+
+    audio.currentTime = 61.5 // 行2 窗口内：重新出现
+    act(() => { audio.emit('timeupdate') })
+    fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
+    expect(fxEl.style.backgroundPositionX).toBe('33.64%')   // 过 1500/2750
+
+    audio.currentTime = 65   // 行2 唱完后同样消隐（静默到曲尾）
+    act(() => { audio.emit('timeupdate') })
+    expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
   })
 
   it('QRC 行窗口：卡拉OK改音频时钟驱动——位置随 timeupdate 实时校准，间奏停满亮不摊平', async () => {
@@ -2811,6 +2820,7 @@ describe('dsh-music-player client render smoke', () => {
     }
     try {
       const { container, audio } = await mountMusicFx({ fxPref: 'karaoke', localLrc: false })
+      audio.duration = 20
       audio.currentTime = 0
       act(() => { audio.emit('timeupdate') })
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第一句歌词')
@@ -2833,13 +2843,17 @@ describe('dsh-music-player client render smoke', () => {
       fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(fxEl.style.backgroundPositionX).toBe('6.30%')   // (1.05−0.956)/1.5
 
-      // 末行唱完后（9~20s 长间奏）：行保持显示、扫色停在满亮 0% —— 不摊平不重跑
+      // 末行唱完后（9~20s 长间奏，静默 11s > 1.2s 阈值）：歌词消隐——不再挂到下一句
       audio.currentTime = 12
+      act(() => { audio.emit('timeupdate') })
+      expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
+
+      // 唱完前的瞬间（8.9s）：仍在显示（真实行窗口内）
+      audio.currentTime = 8.9
       act(() => { audio.emit('timeupdate') })
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('第二句歌词')
       const el = container.querySelector('.dsh-music-bar-lyric-fx')
       expect(el.getAttribute('data-fx')).toBe('karaoke')
-      expect(el.style.backgroundPositionX).toBe('3.33%')      // 唱完/间奏：分界停在屏外满亮态
 
       // 暂停：fx 层仍挂 fxfrozen 类（跑马灯/入场动画时钟冻结）
       act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
