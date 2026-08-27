@@ -5366,7 +5366,7 @@ describe('dsh-music-player client render smoke', () => {
 
     // 歌词动效分段选择器：五个选项，默认 none（无动效）选中
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
-    expect(segBtns.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK扫色'])
+    expect(segBtns.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '交叉淡化', '模糊浮入', '卡拉OK'])
     expect(segBtns.findIndex((b) => b.classList.contains('on'))).toBe(0)
     act(() => { segBtns[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
