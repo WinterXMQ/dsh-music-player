@@ -886,6 +886,97 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('separates a low-frequency tone into the LOW band only (Hann window + soft band edges)', async () => {
+    // 分频段波形必须真实反映频段归属：喂一个 100Hz 正弦（低频段 40-300Hz），
+    // 低频线应有明显起伏、中/高频线应基本平直。Hann 窗抑制矩形窗频谱泄漏 + 频段
+    // 边缘余弦过渡抑制砖墙振铃后，泄漏残差应被压到很小（画布 h=20，中/高频 span < 3px）。
+    prefsServer = { 'dsh-music-viz-mode': 'wave' }
+    class FakeStream { getAudioTracks() { return [{ kind: 'audio' }] } }
+    class LiveAudio extends FakeAudio {
+      play() { this.paused = false; for (const fn of (this.listeners.play || [])) fn(); return Promise.resolve() }
+      captureStream() { return new FakeStream() }
+    }
+    class FakeAnalyser {
+      constructor(ctx, toneHz) { this.ctx = ctx; this.toneHz = toneHz || 100; this.fftSize = 2048; this.smoothingTimeConstant = 0.3; this.frequencyBinCount = 1024 }
+      connect() {}
+      getByteFrequencyData(arr) { for (let i = 0; i < arr.length; i++) arr[i] = 120 }
+      getByteTimeDomainData(arr) {
+        // 真实滚动窗：每帧推进 1/60s（≈800 样本），返回以当前时刻结尾的 2048 样本。
+        // 这样客户端只把「新增样本」喂给滤波器，每个样本恰好滤波一次。
+        this.ctx.currentTime += 1 / 60;
+        const pos = Math.round(this.ctx.currentTime * this.ctx.sampleRate);
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.round(128 + 100 * Math.sin((2 * Math.PI * this.toneHz * (pos - arr.length + i)) / this.ctx.sampleRate))
+      }
+    }
+    class LiveCtx {
+      constructor() { this.state = 'running'; this.sampleRate = 48000; this.currentTime = 0; this.destination = {} }
+      resume() { this.state = 'running'; return Promise.resolve() }
+      close() { this.state = 'closed' }
+      createMediaStreamSource() { return { connect: () => {} } }
+      createAnalyser() { return new FakeAnalyser(this) }
+    }
+    const strokes = [] // 每条 stroke 记录的 y 坐标
+    let current = []
+    const fakeCtx = {
+      clearRect: () => {},
+      beginPath: () => {},
+      moveTo: (x, y) => { current.push(y) },
+      lineTo: (x, y) => { current.push(y) },
+      stroke: () => { strokes.push(current); current = [] },
+      fillRect: () => {},
+      fillStyle: '', strokeStyle: '', lineWidth: 0, lineCap: '', lineJoin: '',
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    let rafCb = null
+    vi.stubGlobal('Audio', LiveAudio)
+    vi.stubGlobal('AudioContext', LiveCtx)
+    vi.stubGlobal('XMLHttpRequest', class { open() {} send() {} })
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', (cb) => { rafCb = cb; return 1 })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    const origGetCtx = HTMLCanvasElement.prototype.getContext
+    HTMLCanvasElement.prototype.getContext = () => fakeCtx
+    try {
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      strokes.length = 0; current = []
+      // 多跑几帧让波形缓动(0.3)与自适应增益收敛
+      for (let f = 0; f < 12; f++) act(() => { rafCb() })
+      const last = strokes.slice(-3)
+      expect(last.length).toBe(3)
+      const span = (ys) => { let mn = Infinity, mx = -Infinity; for (const y of ys) { if (y < mn) mn = y; if (y > mx) mx = y; } return mx - mn }
+      // 低音正弦 → 低频线明显起伏（span 大），中/高频线基本平直（span 小）
+      expect(span(last[0])).toBeGreaterThan(10) // low
+      expect(span(last[1])).toBeLessThan(3)    // mid
+      expect(span(last[2])).toBeLessThan(3)    // high
+      // 关键回归：波形左右两端也要有真实振幅（时域滤波无窗函数，不会像 Hann 窗
+      // 那样把两端淡出到中线）。取低频线首/末各 300 个点（覆盖 >半周期，必含峰值），
+      // 两端都应明显偏离中线。
+      const edgeDev = (ys) => { let mx = 0; for (const y of ys) { const d = Math.abs(y - 10); if (d > mx) mx = d; } return mx }
+      expect(edgeDev(last[0].slice(0, 300))).toBeGreaterThan(4)  // 左端有振幅
+      expect(edgeDev(last[0].slice(-300))).toBeGreaterThan(4)    // 右端有振幅
+    } finally {
+      HTMLCanvasElement.prototype.getContext = origGetCtx
+    }
+  })
+
   it('drives the bars from the live captureStream+AnalyserNode spectrum when available', async () => {
     // Real-time path: when the <audio> exposes captureStream() (a read-only tap) and an
     // AudioContext provides a MediaStreamSource + AnalyserNode, drawViz must read
