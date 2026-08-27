@@ -4467,8 +4467,9 @@ describe('dsh-music-player client render smoke', () => {
       if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
       if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [{ id: 'p1', name: '我的酷狗歌单', creator: '我', trackCount: 2, source: 'kugou', cover: '' }] })
       if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
-        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
-        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], payType: 3, privilege: 10, source: 'kugou' },
+        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], payType: 0, privilege: 0, source: 'kugou' },
+        { id: 'KG3', hash: 'KG3', title: '酷狗三号', artists: ['歌手C'], payType: 1, privilege: 10, source: 'kugou' },
       ] } })
       if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
       if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
@@ -4510,6 +4511,14 @@ describe('dsh-music-player client render smoke', () => {
     expect(plCard).toBeTruthy()
     act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 付费歌带 VIP 标、免费歌不带（回归：酷狗 VIP 判定 pay_type/privilege > 0。
+    // payType=1（如「西楼儿女」海来阿木版，搜索里可见）与 payType=3（歌单常见）
+    // 都算付费；旧条件 ===1 只认 1、漏掉 3 → 歌单歌曲一律不显示 VIP）。
+    const vipRows = [...container.querySelectorAll('.dsh-music-track-row')].filter((row) => row.querySelector('.dsh-music-online-tag.vip'))
+    expect(vipRows.length).toBe(2)
+    expect(vipRows.map((r) => r.textContent).filter((t) => t.includes('酷狗一号') && t.includes('VIP')).length).toBe(1)
+    expect(vipRows.map((r) => r.textContent).filter((t) => t.includes('酷狗三号') && t.includes('VIP')).length).toBe(1)
+    expect(vipRows.map((r) => r.textContent).filter((t) => t.includes('酷狗二号')).length).toBe(0)
     const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('酷狗一号'))
     expect(song).toBeTruthy()
     act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -4520,7 +4529,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(saved).toBeTruthy()
     expect(saved.id).toBe('kg:KG1')
     expect(Array.isArray(saved.queue)).toBe(true)
-    expect(saved.queue.length).toBe(2)
+    expect(saved.queue.length).toBe(3)
     expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('kg')
   })
 
