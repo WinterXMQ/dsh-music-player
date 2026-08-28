@@ -23,6 +23,7 @@ vi.mock('../lib/kugou.js', () => ({
   deletePlaylist: vi.fn(),
   addSongToPlaylist: vi.fn(),
   deleteSongFromPlaylist: vi.fn(),
+  getDownloadURL: vi.fn(),
   registerDevice: vi.fn(),
   createDeviceIdentity: vi.fn(),
   refreshSession: vi.fn(),
@@ -329,5 +330,24 @@ describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () 
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.loggedIn).toBe(false)
     expect(saved.session.dfid).toBe('DFID') // 指纹仍保留
+  })
+})
+
+describe('酷狗取链去重：同一首歌的 HEAD/GET 并发只取一次链', () => {
+  it('REGRESSION: /kg/play 的 HEAD + GET 同时到达 → getDownloadURL 只调用一次（in-flight 去重）', async () => {
+    const hash = '688857974673645ce89eda26a36db19d'
+    // 取链带延迟（模拟 tracker 慢）：并发请求在缓存写入前都 miss 的场景
+    vi.mocked(KG.getDownloadURL).mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve({ url: '', quality: '', bitrate: 0 }), 30)
+    }))
+    const res1 = makeRes(), res2 = makeRes()
+    await Promise.all([
+      booted.handler(makeReq({ method: 'GET', url: '/dsh-music/kg/play/' + hash }), res1),
+      booted.handler(makeReq({ method: 'HEAD', url: '/dsh-music/kg/play/' + hash }), res2),
+    ])
+    // 取链结果为空 → 路由回 404（不触发对 url 的 fetch），仅用于验证只取一次链
+    expect(res1.status).toBe(404)
+    expect(res2.status).toBe(404)
+    expect(KG.getDownloadURL).toHaveBeenCalledTimes(1)
   })
 })
