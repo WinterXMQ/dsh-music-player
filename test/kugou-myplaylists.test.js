@@ -99,6 +99,47 @@ describe('getMyPlaylists 自建/收藏/系统默认区分', () => {
     expect(pls[0].isDefault).toBe(true)
   })
 
+  it('系统默认歌单带 isDef/isLike：默认收藏 isDef=1、我喜欢 isDef=2', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].isDef).toBe(1) // 默认收藏
+    expect(pls[0].isLike).toBe(false)
+    expect(pls[1].isDef).toBe(2) // 我喜欢
+    expect(pls[1].isLike).toBe(true)
+  })
+
+  it('「我喜欢」（is_def=2）无 pic 时用内嵌爱心封面；默认收藏无 pic 保持空封面', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].cover).toBe('') // 默认收藏：接口无 pic → 空（前端显示音符占位）
+    expect(pls[1].cover).toMatch(/^data:image\/jpeg;base64,/) // 我喜欢：内嵌 QQ 爱心封面
+  })
+
+  it('REGRESSION: 默认收藏无 pic 时取歌单第一首歌的封面兜底，且带缓存', async () => {
+    // /v7/get_all_list 返回默认收藏（listid=5，无 pic）；/v4/get_list_all_file 返回歌曲（带 cover）
+    const songsCalls = []
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/v4/get_list_all_file')) {
+        songsCalls.push(u)
+        return { status: 200, text: async () => JSON.stringify({ status: 1, data: { info: [
+          { hash: 'AAAA', name: 'Beyond - 不再犹豫.mp3', singerinfo: [{ name: 'Beyond' }], timelen: 262000, cover: 'http://imge.kugou.com/stdmusic/{size}/20250213/x.jpg', album_id: 1 },
+        ] } }), json: async () => ({ status: 1, data: { info: [] } }) }
+      }
+      return { status: 200, text: async () => JSON.stringify({ status: 1, data: { info: [
+        { listid: 5, name: '默认收藏', type: 0, is_def: 1, count: 1 },
+      ] } }), json: async () => ({ status: 1, data: { info: [] } }) }
+    }))
+    const session = { ...SESSION, userid: '999' } // 独立 userid，隔离封面缓存
+    const pls = await getMyPlaylists(session)
+    expect(pls[0].name).toBe('默认收藏')
+    // 歌曲 cover 走 kgCover：{size}→240、http→https
+    expect(pls[0].cover).toBe('https://imge.kugou.com/stdmusic/240/20250213/x.jpg')
+    const firstCalls = songsCalls.length
+    await getMyPlaylists(session)
+    expect(songsCalls.length).toBe(firstCalls) // 第二次命中缓存，不再拉取歌单歌曲
+  })
+
   it('多条目混排：自建/收藏/系统默认各自正确标注', async () => {
     stubMyPlaylists([OWN_ENTRY, FAV_ENTRY, COLLECT_ENTRY])
     const pls = await getMyPlaylists(SESSION)

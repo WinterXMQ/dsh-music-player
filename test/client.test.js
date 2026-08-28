@@ -4915,6 +4915,70 @@ describe('dsh-music-player client render smoke', () => {
     expect(kgPane.querySelectorAll('.dsh-music-playlist-mini.add').length).toBe(0)
   })
 
+  it('REGRESSION: 酷狗「我喜欢」用内嵌爱心封面、「默认收藏」等无封面显示音符占位', async () => {
+    // 云歌单接口（v7/get_all_list）对系统默认歌单（is_def=1 默认收藏 / is_def=2 我喜欢）
+    // 不返回 pic 封面字段。后端已为「我喜欢」内嵌 QQ 官方爱心封面（data URI），所以
+    // 它渲染 <img>；「默认收藏」封面为空 → .dsh-music-playlist-cover.empty 音符占位块，
+    // 而不是 <img src=""> 导致的空白；有封面的歌单仍正常出图。
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [
+        { id: 'def1', name: '我喜欢', kind: 'own', isDefault: true, isDef: 2, creator: '', trackCount: 44, source: 'kugou', cover: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==mock' },
+        { id: 'def2', name: '默认收藏', kind: 'own', isDefault: true, isDef: 1, creator: '', trackCount: 1, source: 'kugou', cover: '' },
+        { id: 'own1', name: '我的自建歌单', kind: 'own', isDefault: false, creator: '', trackCount: 2, source: 'kugou', cover: 'https://c1.kgimg.com/custom/300/x.jpg' },
+      ] })
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 「我的歌单」是默认 tab：我喜欢 → <img>（内嵌爱心封面）；默认收藏 → 音符占位；有封面 → <img>
+    const cards = [...container.querySelectorAll('.dsh-music-playlist-card')]
+    expect(cards.length).toBe(3)
+    const likeCard = cards.find((c) => c.textContent.includes('我喜欢'))
+    const defCard = cards.find((c) => c.textContent.includes('默认收藏'))
+    const ownCard = cards.find((c) => c.textContent.includes('我的自建歌单'))
+    const likeImg = likeCard.querySelector('img.dsh-music-playlist-cover')
+    expect(likeImg).toBeTruthy() // 我喜欢 → 内嵌爱心封面 <img>
+    expect(likeImg.getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/)
+    expect(likeCard.querySelector('.dsh-music-playlist-cover.empty')).toBeNull()
+    expect(defCard.querySelector('.dsh-music-playlist-cover.empty .dsh-music-note')).toBeTruthy() // 默认收藏 → 音符占位
+    expect(defCard.querySelector('img.dsh-music-playlist-cover')).toBeNull()
+    expect(ownCard.querySelector('img.dsh-music-playlist-cover')).toBeTruthy()
+    // 占位音符 svg 有实际图形元素（path），不是空壳。
+    expect(defCard.querySelector('.dsh-music-playlist-cover.empty .dsh-music-note path')).toBeTruthy()
+  })
+
   it('collects a public KuGou playlist via the detail-page 收藏 button', async () => {
     // 公开歌单详情页头应有「☆ 收藏」按钮；点击后调 /dsh-music/kg/playlist-collect
     // （v5/add_list type=1），成功后置灰为「★ 已收藏」并刷新「我的歌单」。
