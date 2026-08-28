@@ -30,9 +30,15 @@ DeepSeek Harness 音乐/小说播放插件。
 
 ![播放QQ音乐](assets/screenshot-qq.png)
 
+![播放酷狗音乐](assets/screenshot-kg.png)
+
 ![播放AI讲书](assets/screenshot-spectrum.png)
 
-![播放面板](assets/screenshot-panel.png)
+![播放面板1](assets/screenshot-panel-qq.png)
+
+![播放面板2](assets/screenshot-panel-kg.png)
+
+![播放面板3](assets/screenshot-panel.png)
 
 ## 安装
 
