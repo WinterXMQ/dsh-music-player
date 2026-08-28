@@ -2073,6 +2073,76 @@ describe('dsh-music-player client render smoke', () => {
     bookTextFixture = ''
   })
 
+  it('advances when `ended` arrives during resume buffering, and swallows only the duplicate after a real advance', async () => {
+    // Regression（冷启动续播残留卡死）: 恢复续播的块被重合成得比保存位置短时，旧实现
+    // 在 togglePlay 里「时长未知就提前 seek」→ 被 browser 钳到块尾，`ended` 会在
+    // 「AI 合成中」缓冲态（尚未切块过）到达，被旧逻辑 `if (bookBuffering) return`
+    // 无条件吞掉 → 不切块、不报错、缓冲随后被 play promise 清掉 → 永久「没声音、
+    // 字幕不动」。正确行为：①时长未知绝不提前 seek；②缓冲态中、尚无切块发生时，
+    // ended 是「本块真结束」→ 清缓冲并切块；③切块后紧随的重复 ended 才是陈旧事件
+    // （吞掉，防连跳两块）。
+    const audios = []
+    class ClampStallAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this._resolvePlay = null }
+      play() {
+        this.paused = false
+        this._playPromise = new Promise((res) => { this._resolvePlay = res })
+        return this._playPromise
+      }
+      resolvePlay() { if (this._resolvePlay) { const r = this._resolvePlay; this._resolvePlay = null; r() } }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '钳尾续播测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '钳尾续播测试文本。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '钳尾续播测试.txt': { from: 2, base: 400, pos: 5, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ClampStallAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // ▶ 续播 → src 指向恢复块；时长未知时绝不提前 seek（旧实现在此把越界位置塞进
+    // currentTime、随后被钳到块尾埋雷）。
+    act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=2')
+    expect(audio.currentTime).toBe(0) // duration unknown → no early seek
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeTruthy()
+    // 模拟钳尾：ended 带着缓冲态直接到达（没有 timeupdate/onDur 补救的窗口）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=3') // jumped to the next chunk, NOT stalled
+    // 切块后紧随的陈旧重复 ended（旧块的）必须被吞掉——不连跳两块
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=3')
+    // 新块真正开始播放 → 缓冲清除，此后 ended 恢复为真实切块语义
+    audio.resolvePlay()
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
+    bookTextFixture = ''
+  })
+
   it('does NOT append a chapter name or the “-” separator when the novel has no chapters', async () => {
     // A novel with no detectable section structure must show ONLY the book title
     // in the bar — no " - " and no chapter text appended (currentSection stays '').
