@@ -367,6 +367,37 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts KuGou-related prefs (kg-playback / kg-history) through the allowlist (persistence regression)', async () => {
+    // 回归：酷狗播放进度+队列曾漏出 Host 白名单，POST 被 sanitizePrefs 静默丢弃，
+    // 导致「播酷狗时刷新页面，播放条恢复成 QQ 音乐」（restoreLatest 找不到酷狗记录、
+    // kgTs=-1，回退到时间戳最新的 QQ 记录）。kg-playback / kg-history 必须能存、
+    // 能 GET 回读——否则刷新后酷狗播放数据不落盘。
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-kg-playback': JSON.stringify({ id: 'kg:abc123', name: '晴天', artists: ['周杰伦'], position: 42, duration: 260, queue: [{ hash: 'abc123', title: '晴天', artists: ['周杰伦'] }], source: '在线', ts: 1234567890 }),
+          'dsh-music-kg-history': JSON.stringify(['周杰伦', '酷狗热搜']),
+        } }) }),
+        res,
+      )
+      let d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      const saved = JSON.parse(d.prefs['dsh-music-kg-playback'])
+      expect(saved.id).toBe('kg:abc123')
+      expect(saved.position).toBe(42)
+      expect(saved.queue[0].hash).toBe('abc123')
+      expect(JSON.parse(d.prefs['dsh-music-kg-history'])).toContain('周杰伦')
+      // GET 回读：快照里确实持久化了酷狗记录
+      const g = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/prefs' }), g)
+      const gd = JSON.parse(g.body)
+      expect(JSON.parse(gd.prefs['dsh-music-kg-playback']).id).toBe('kg:abc123')
+      expect(JSON.parse(gd.prefs['dsh-music-kg-history'])).toContain('酷狗热搜')
+    } finally { cleanup() }
+  })
+
   it('accepts the lyric fx pref through the allowlist, drops invalid fx and non-config keys (persistence regression)', async () => {
     // 回归：新配置键若漏出 Host 白名单，POST 会被 sanitizePrefs 静默丢弃，
     // 表现为「歌词动效设置刷新后重置」。fx 必须能存、能 GET 回读；

@@ -19,7 +19,7 @@ import crypto from 'node:crypto'
 import { decryptKrc, parseKrc, parseLanguageTag, pickLyricCandidate } from '../lib/krc.js'
 import {
   signWeb, signAndroid, trackSignKey, computeMid, createDeviceIdentity,
-  splitFileName,
+  splitFileName, normalizeSong,
 } from '../lib/kugou.js'
 
 describe('kugou signWeb', () => {
@@ -88,6 +88,37 @@ describe('kugou trackSignKey / mid / device', () => {
     expect(d.guid).toMatch(/^[0-9a-f-]{36}$/)
     expect(/^[0-9]+$/.test(d.mid)).toBe(true)
     expect(d.dfid).toMatch(/^[0-9A-F]{24}$/)
+  })
+})
+
+describe('kugou normalizeSong（<em> 高亮标签剥离）', () => {
+  it('SingerName 整段被 <em> 包裹时拆成单个干净歌手（回归：歌手名后带 </em>）', () => {
+    // 按歌手名搜索时，song_search_v2 把命中词整段包成 "<em>周杰伦</em>"。
+    // 旧实现先按 / 拆分再 emStrip，`</em>` 里的 `/` 会把字符串切成
+    // ["<em>周杰伦<", "em>"] → 歌手名变 "周杰伦< / em>"。必须先剥标签再拆。
+    const s = normalizeSong({ FileHash: 'A'.repeat(32), SongName: '晴天', SingerName: '<em>周杰伦</em>', Duration: 260 })
+    expect(s.artists).toEqual(['周杰伦'])
+    expect(s.title).toBe('晴天')
+  })
+
+  it('多歌手（/ 分隔）在剥标签后仍能正确拆分', () => {
+    const s = normalizeSong({ FileHash: 'B'.repeat(32), SongName: '歌', SingerName: '<em>周杰伦</em>/<em>林俊杰</em>', Duration: 200 })
+    expect(s.artists).toEqual(['周杰伦', '林俊杰'])
+  })
+
+  it('SongName 缺失回退 filename：标题/歌手里的 <em> 一并剥离', () => {
+    const s1 = normalizeSong({ FileHash: 'C'.repeat(32), filename: '<em>周杰伦</em> - 晴天', Duration: 240 })
+    expect(s1.title).toBe('晴天')
+    expect(s1.artists).toEqual(['周杰伦'])
+    const s2 = normalizeSong({ FileHash: 'D'.repeat(32), filename: '周杰伦 - <em>晴</em>天', Duration: 240 })
+    expect(s2.title).toBe('晴天')
+    expect(s2.artists).toEqual(['周杰伦'])
+  })
+
+  it('em 标签带属性/大写也剥离（防御：API 换高亮格式不回归）', () => {
+    const s = normalizeSong({ FileHash: 'E'.repeat(32), SongName: '<EM class="hl">晴</EM>天', SingerName: '<em class="x">周</em>杰伦', Duration: 200 })
+    expect(s.title).toBe('晴天')
+    expect(s.artists).toEqual(['周杰伦'])
   })
 })
 
