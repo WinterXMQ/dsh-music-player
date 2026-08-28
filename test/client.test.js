@@ -256,7 +256,10 @@ async function bootClient() {
 // 上不足以等完这串异步，find() 会返回 undefined、后续 dispatchEvent 抛
 // TypeError。这里用真实定时器轮询，对时序免疫（仅用于真实定时器测试，
 // 不用于 vi.useFakeTimers() 的用例）。超时仍找不到则抛出以暴露问题。
-async function waitForText(container, selector, text, timeout = 1500) {
+// 默认 5s：2 核 CI runner 上全文件 142 用例并行跑时，fetch 链 + React 提交
+// 可能被 CPU 争抢拖过 1.5s（实测出现过一次推荐歌单 viewtab 超时假失败）；
+// 正常路径毫秒级返回，超时只影响真失败时多久报错。
+async function waitForText(container, selector, text, timeout = 5000) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const el = [...container.querySelectorAll(selector)].find((b) => b.textContent === text);
