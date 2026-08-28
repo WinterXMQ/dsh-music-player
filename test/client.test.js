@@ -4762,6 +4762,75 @@ describe('dsh-music-player client render smoke', () => {
     expect(JSON.parse(prefsServer['dsh-music-scope']).kind).toBe('kg')
   })
 
+  it('loads KuGou lyrics on auto-advance / 下一首 via startPlay (regression)', async () => {
+    // 回归：酷狗歌词原来只在面板直接点歌（startKGPlayback）时加载；自动续播/上下曲走
+    // startPlay → loadLyricForTrack，但该函数漏了 kg: 分支且酷狗曲目没有本地 path，
+    // 会提前 return → 自动/手动下一首时不出歌词（只有点同一首歌才出）。
+    const baseFetch = fetchStub
+    const lyricReq = []
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [{ id: 'p1', name: '我的酷狗歌单', creator: '我', trackCount: 2, source: 'kugou', cover: '' }] })
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) {
+        lyricReq.push(u)
+        const hash = new URL('http://x' + u).searchParams.get('hash') || ''
+        return jsonRes({ ok: true, source: 'kugou', lrc: [{ t: 0, text: hash === 'KG1' ? '酷狗一号歌词' : '酷狗二号歌词' }] })
+      }
+      return baseFetch(url, opts)
+    })
+    const audios = []
+    class KGAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', KGAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const plCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('我的酷狗歌单'))
+    act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('酷狗一号'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 直接点歌 → startKGPlayback → 歌词出现
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toContain('酷狗一号歌词')
+    // 点「下一首」→ step → startPlay → 必须为酷狗二号再取词并显示歌词
+    const nextBtn = container.querySelector('button[title="下一首"]')
+    act(() => { nextBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(lyricReq.some((u) => new URL('http://x' + u).searchParams.get('hash') === 'KG2')).toBe(true)
+    expect(container.querySelector('.dsh-music-bar-lyric').textContent).toContain('酷狗二号歌词')
+  })
+
   it('restores KuGou search history from the Host prefs even when the prefs fetch is slow (panel mounts before snapshot)', async () => {
     // Timing regression: the /dsh-music/prefs snapshot can arrive AFTER the KG panel
     // mounts (like QQ, it is eagerly mounted and hidden with display:none). The mount-time
