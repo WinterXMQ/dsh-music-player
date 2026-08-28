@@ -4883,7 +4883,8 @@ describe('dsh-music-player client render smoke', () => {
     const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
     act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // 「我的歌单」是默认 tab：自建歌单有 ✕ 删除按钮；收藏/系统默认歌单没有。
+    // 「我的歌单」是默认 tab：自建歌单有 ✕ 删除按钮、收藏歌单有 ☆ 取消收藏按钮、
+    // 系统默认歌单（我喜欢）没有删除按钮。
     const cards = [...container.querySelectorAll('.dsh-music-playlist-card')]
     expect(cards.length).toBe(3)
     const ownCard = cards.find((c) => c.textContent.includes('我的自建歌单'))
@@ -4893,10 +4894,18 @@ describe('dsh-music-player client render smoke', () => {
     expect(colCard.textContent).toContain('收藏')
     expect(colCard.textContent).toContain('别人') // 收藏歌单展示原作者
     expect(defCard.textContent).toContain('默认')
-    // ✕ 删除按钮仅自建歌单有（收藏/系统默认不出现）
-    expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(1)
-    const delTitle = container.querySelector('.dsh-music-qq-mine-del').title
-    expect(delTitle).toContain('我的自建歌单')
+    // 自建 → ✕ 删除；收藏 → ☆ 取消收藏；系统默认无删除按钮
+    expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(2)
+    const dels = [...container.querySelectorAll('.dsh-music-qq-mine-del')]
+    const ownDel = dels.find((b) => b.title.includes('我的自建歌单'))
+    const colDel = dels.find((b) => b.title.includes('周杰伦歌单'))
+    expect(ownDel).toBeTruthy()
+    expect(ownDel.title).toContain('删除歌单')
+    expect(ownDel.textContent).toBe('✕')
+    expect(colDel).toBeTruthy()
+    expect(colDel.title).toContain('取消收藏歌单')
+    expect(colDel.textContent).toBe('☆')
+    expect(colDel.className).toContain('uncollect')
     // 打开「收藏」歌单详情：歌曲行是「＋ 加入我的歌单」，而不是「− 移除」
     const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container;
     act(() => { colCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -4913,6 +4922,75 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(kgPane.querySelectorAll('.dsh-music-playlist-mini.remove').length).toBe(2)
     expect(kgPane.querySelectorAll('.dsh-music-playlist-mini.add').length).toBe(0)
+  })
+
+  it('取消收藏酷狗收藏歌单：点 ☆ → 确认框（取消收藏）→ POST playlist-delete → 从列表移除', async () => {
+    const baseFetch = fetchStub
+    const delCalls = []
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url); const o = opts || {}
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [
+        { id: '8', name: '周杰伦歌单', kind: 'collect', isDefault: false, creator: '别人', trackCount: 5, source: 'kugou', cover: '' },
+        { id: '3', name: '我的自建歌单', kind: 'own', isDefault: false, creator: '', trackCount: 2, source: 'kugou', cover: '' },
+      ] })
+      if (u === '/dsh-music/kg/playlist-delete' && o.method === 'POST') {
+        try { delCalls.push(JSON.parse(o.body || '{}')) } catch {}
+        return jsonRes({ ok: true })
+      }
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 收藏歌单卡片的 ☆（取消收藏）按钮 → 点它
+    const colDel = [...container.querySelectorAll('.dsh-music-qq-mine-del')].find((b) => b.title.includes('周杰伦歌单'))
+    expect(colDel).toBeTruthy()
+    expect(colDel.title).toContain('取消收藏')
+    act(() => { colDel.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 自定义确认框：标题「取消收藏」+ 危险按钮文案「取消收藏」
+    const confirmBox = document.querySelector('.dsh-music-picker.confirm')
+    expect(confirmBox).toBeTruthy()
+    expect(confirmBox.textContent).toContain('取消收藏歌单')
+    const okBtn = confirmBox.querySelector('.dsh-music-settings-btn.danger')
+    expect(okBtn.textContent).toBe('取消收藏')
+    act(() => { okBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // POST /dsh-music/kg/playlist-delete 带收藏歌单的 listid（数字），并从列表移除
+    expect(delCalls.length).toBe(1)
+    expect(delCalls[0].listId).toBe(8)
+    expect([...container.querySelectorAll('.dsh-music-playlist-card')].find((c) => c.textContent.includes('周杰伦歌单'))).toBeFalsy()
+    // 自建歌单仍在
+    expect([...container.querySelectorAll('.dsh-music-playlist-card')].find((c) => c.textContent.includes('我的自建歌单'))).toBeTruthy()
   })
 
   it('REGRESSION: 酷狗「我喜欢」用内嵌爱心封面、「默认收藏」等无封面显示音符占位', async () => {
