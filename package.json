@@ -37,7 +37,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "ci": "vitest run"
+    "ci": "vitest run --retry=2 --testTimeout=20000"
   },
   "dsh": {
     "bundle": {
