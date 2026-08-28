@@ -2781,13 +2781,13 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricFixture = null }
   }
 
-  it("fx='slide'（显式选择）：每行歌词重挂载重放入场动画，上一行只经 data-prev 提供给伪元素（textContent 恒为当前行）", async () => {
+  it("fx='slide'（显式选择）：每行歌词重挂载重放入场动画；无退场动画，上一句即时消失（data-prev 仅作入场延迟判定）", async () => {
     const { container, audio } = await mountMusicFx({ fxPref: 'slide' })
     audio.currentTime = 0
     act(() => { audio.emit('timeupdate') })
     let outer = container.querySelector('.dsh-music-bar-lyric')
     expect(outer).toBeTruthy()
-    // 关键回归：textContent 是「纯净的当前行」（退场旧行放 CSS 伪元素，不进 DOM 文本）
+    // 关键回归：textContent 是「纯净的当前行」（退场伪元素已移除，上一句不残留 DOM）
     expect(outer.textContent).toBe('第一句歌词')
     let fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
     expect(fxEl.getAttribute('data-fx')).toBe('slide')
@@ -2798,7 +2798,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.querySelector('.dsh-music-bar-lyric-run.mq')).toBeNull()
 
     // 前进到第二句：key(seq) 变化强制重挂载 → 浏览器里入场动画重放；
-    // 上一行只出现在 data-prev 属性上。
+    // 上一句即时消失，无 ::after 退场层；data-prev 仅保留供「首次挂载」延迟判定。
     const fxFirst = fxEl
     audio.currentTime = 6
     act(() => { audio.emit('timeupdate') })
@@ -2807,6 +2807,8 @@ describe('dsh-music-player client render smoke', () => {
     fxEl = container.querySelector('.dsh-music-bar-lyric-fx')
     expect(fxEl).not.toBe(fxFirst)                     // 确实重新挂载了
     expect(fxEl.getAttribute('data-prev')).toBe('第一句歌词')
+    // 无退场层：新句元素上没有 ::after 伪元素（真实浏览器里上一句不叠映）
+    expect(fxEl.nextSibling).toBeNull()
   })
 
   it('REGRESSION: 长句跑马灯运行中切到短句，短句不再带 mq（mock 布局复现换行时序）', async () => {
@@ -3996,6 +3998,56 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(headLog).toContain('/dsh-music/kg/play/KG2')
     expect(container.textContent).toContain('酷狗音乐 · 无损')
+  })
+
+  it('酷狗登录已失效（服务端返回 kgLoginDead）→ 面板自动回到扫码登录页并提示重扫', async () => {
+    // 服务端在「刷新登录态也遇设备不匹配(20018)」时已自动登出并回 kgLoginDead 标记。
+    // 前端 json/kgPost 检测到即复位面板到 !loggedIn，展示「请重新扫码登录」而不是
+    // 一直挂着「刷新登录态失败」的报错（用户「播着播着不能播、刷新后 UI 报错」场景）。
+    const baseFetch = fetchStub
+    const deadErr = '酷狗登录已失效（登录态与设备不匹配），请重新扫码登录'
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: false, error: deadErr, kgLoginDead: true })
+      if (u === '/dsh-music/kg/liked') return jsonRes({ ok: false, error: deadErr, kgLoginDead: true })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 多 flush：挂载后 status → loggedIn=true → 触发 refreshMine/refreshKGFavIds →
+    // 收到 kgLoginDead → markKgAuthDead → 面板 effect 复位到扫码登录页。
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')][1]
+    expect(kgPane.querySelector('.dsh-music-qq-login-dead')).toBeTruthy()
+    expect(kgPane.textContent).toContain('请重新扫码登录')
+    expect(kgPane.textContent).toContain('酷狗音乐APP登录')
+    // 不再处于已登录主界面（无「退出登录」工具栏）
+    expect([...kgPane.querySelectorAll('.dsh-music-settings-btn')].some((b) => b.textContent === '退出登录')).toBe(false)
   })
 
   it('REGRESSION: 播放酷狗「我喜欢」歌单中的歌曲时，播放条爱心点亮（并可取消收藏）', async () => {

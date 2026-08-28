@@ -183,3 +183,56 @@ describe('酷狗「我喜欢」集合接口（/dsh-music/kg/liked，供播放条
     expect(res.status).toBe(401)
   })
 })
+
+describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自动登出 + kgLoginDead 标记', () => {
+  it('业务接口报设备不匹配、刷新也报设备不匹配：清空会话并返回 kgLoginDead:true', async () => {
+    vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))
+    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(502)
+    const d = JSON.parse(res.body)
+    expect(d.ok).toBe(false)
+    expect(d.kgLoginDead).toBe(true)
+    expect(d.error).toContain('请重新扫码登录')
+    expect(KG.refreshSession).toHaveBeenCalled()
+    // 会话已自动清空：cookie 文件 loggedIn:false，token 置空
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(false)
+    expect(saved.session.token).toBe('')
+  })
+
+  it('刷新成功（会话可续命）→ 重试原接口，不登出、不带标记', async () => {
+    vi.mocked(KG.getMyPlaylists)
+      .mockRejectedValueOnce(new Error('云歌单：登录态与设备不匹配（20017）'))
+      .mockResolvedValueOnce([
+        { id: '2', name: '我喜欢', kind: 'own', isLike: true, isDef: 2, trackCount: 44, cover: '' },
+        { id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 2, cover: '' },
+      ])
+    vi.mocked(KG.refreshSession).mockResolvedValue({ token: 'tok2', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(200)
+    const d = JSON.parse(res.body)
+    expect(d.ok).toBe(true)
+    expect(d.kgLoginDead).toBeUndefined()
+    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(2) // 首次失败 + 刷新后重试
+    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(true) // 未登出
+    expect(saved.session.token).toBe('tok2') // 新 token 已落盘
+  })
+
+  it('刷新失败但非设备不匹配（如瞬时网络错）→ 不登出、不带标记', async () => {
+    vi.mocked(KG.getMyPlaylists).mockRejectedValue(new Error('云歌单：登录态与设备不匹配（20017）'))
+    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：网络超时'))
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(502)
+    const d = JSON.parse(res.body)
+    expect(d.kgLoginDead).toBeUndefined()
+    expect(d.error).toContain('网络超时')
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(true) // 未登出
+  })
+})
