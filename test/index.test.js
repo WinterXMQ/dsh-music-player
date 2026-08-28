@@ -756,8 +756,14 @@ describe('dsh-music-player /dir route', () => {
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/dir?path=__drives__' }), res)
       const data = JSON.parse(res.body)
-      // On non-Windows the sentinel resolves to the POSIX root with no dirs.
       expect([null, '/']).toContain(data.up)
+      if (data.path === '/') {
+        // 回归防护：POSIX 下「本机」应列出真实的根目录内容，不能是空列表——
+        // 否则 macOS/Linux 点了「本机」后列表为空、再也选不了任何目录。
+        expect(Array.isArray(data.dirs)).toBe(true)
+        expect(Array.isArray(data.files)).toBe(true)
+        expect(data.dirs.length + data.files.length).toBeGreaterThan(0)
+      }
     } finally { cleanup() }
   })
 })
