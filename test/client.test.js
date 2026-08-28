@@ -1391,13 +1391,18 @@ describe('dsh-music-player client render smoke', () => {
     expect(pickBtn).toBeTruthy()
     act(() => { pickBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // breadcrumb: root ("/") is clickable, current ("music") is highlighted.
+    // breadcrumb: [💻 本机][›][/][music][↑] — 本机进入盘符列表、↑ 回上级、根可点击、当前高亮。
     let crumbs = [...container.querySelectorAll('.dsh-music-picker-cur .dsh-music-crumb')]
-    expect(crumbs.length).toBe(2)
-    expect(crumbs[0].textContent).toBe('/')
+    expect(crumbs.length).toBe(4)
+    expect(crumbs[0].textContent).toBe('💻 本机')
     expect(crumbs[0].tagName).toBe('BUTTON')
-    expect(crumbs[1].textContent).toBe('music')
-    expect(crumbs[1].className).toContain('cur')
+    expect(crumbs[0].getAttribute('title')).toBe('本机磁盘')
+    expect(crumbs[1].textContent).toBe('/')
+    expect(crumbs[1].tagName).toBe('BUTTON')
+    expect(crumbs[2].textContent).toBe('music')
+    expect(crumbs[2].className).toContain('cur')
+    expect(crumbs[3].textContent).toBe('↑')
+    expect(crumbs[3].getAttribute('title')).toBe('上级目录')
     // list: the directory comes first (clickable button), then files (inert spans).
     const listItems = [...container.querySelectorAll('.dsh-music-picker-list .dsh-music-picker-item')]
     expect(listItems.map((el) => el.textContent.trim())).toEqual(['📁 Albums', '📄 a.mp3', '📄 cover.jpg'])
@@ -1407,13 +1412,16 @@ describe('dsh-music-player client render smoke', () => {
     expect(listItems[1].className).toContain('file')
     // the empty hint no longer exists
     expect(container.textContent).not.toContain('本目录下无子目录')
-    // click the root crumb -> re-browse to "/" and the path collapses to a single crumb.
-    act(() => { crumbs[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // click ↑ -> re-browse to the parent "/" and the path collapses to [本机][/].
+    act(() => { crumbs[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     crumbs = [...container.querySelectorAll('.dsh-music-picker-cur .dsh-music-crumb')]
-    expect(crumbs.length).toBe(1)
-    expect(crumbs[0].textContent).toBe('/')
-    expect(crumbs[0].className).toContain('cur')
+    expect(crumbs.length).toBe(2)
+    expect(crumbs[0].textContent).toBe('💻 本机')
+    expect(crumbs[1].textContent).toBe('/')
+    expect(crumbs[1].className).toContain('cur')
+    // 根目录无上级（up:null）→ ↑ 按钮不显示。
+    expect(container.querySelector('.dsh-music-crumb.up')).toBeNull()
   })
 
   it('shows the configured root before the picker button with a full-path hover tooltip', async () => {
