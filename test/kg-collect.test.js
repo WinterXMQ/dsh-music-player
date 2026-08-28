@@ -27,6 +27,7 @@ vi.mock('../lib/kugou.js', () => ({
   createDeviceIdentity: vi.fn(),
   refreshSession: vi.fn(),
   loginStart: vi.fn(),
+  createQRLogin: vi.fn(),
   checkQRLogin: vi.fn(),
   logout: vi.fn(),
 }))
@@ -196,10 +197,14 @@ describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自
     expect(d.kgLoginDead).toBe(true)
     expect(d.error).toContain('请重新扫码登录')
     expect(KG.refreshSession).toHaveBeenCalled()
-    // 会话已自动清空：cookie 文件 loggedIn:false，token 置空
+    // 会话已自动清空：cookie 文件 loggedIn:false，token 置空；但设备指纹（guid/mid/
+    // dfid）保留——重扫以「老设备」身份回归，酷狗风控更友好。
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.loggedIn).toBe(false)
     expect(saved.session.token).toBe('')
+    expect(saved.session.guid).toBe('g')
+    expect(saved.session.mid).toBe('290402895447160996760242034854185275797')
+    expect(saved.session.dfid).toBe('DFID')
   })
 
   it('刷新成功（会话可续命）→ 重试原接口，不登出、不带标记', async () => {
@@ -234,5 +239,95 @@ describe('酷狗登录已失效（连刷新也报设备不匹配 20018）→ 自
     expect(d.error).toContain('网络超时')
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.loggedIn).toBe(true) // 未登出
+  })
+})
+
+describe('酷狗登出/失效保留设备指纹（guid/mid/dfid），重扫=老设备回归', () => {
+  it('手动退出登录：只清登录态，保留设备指纹', async () => {
+    const res = makeRes()
+    await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/logout' }), res)
+    expect(res.status).toBe(200)
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(false)
+    expect(saved.session.token).toBe('')
+    expect(saved.session.guid).toBe('g')
+    expect(saved.session.mid).toBe('290402895447160996760242034854185275797')
+    expect(saved.session.dfid).toBe('DFID')
+  })
+
+  it('重扫（login/start）复用已保留的指纹，不再重建/注册', async () => {
+    // 模拟「登出后」状态：有指纹、无 token
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: '', userid: '', vip_type: '', vip_token: '' },
+      loggedIn: false, savedAt: Date.now(),
+    }))
+    vi.mocked(KG.createQRLogin).mockResolvedValue({ key: 'K1', imageDataUrl: 'data:image/png;base64,xx', expiresAt: Date.now() + 60000 })
+    const res = makeRes()
+    await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/start' }), res)
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body).ok).toBe(true)
+    expect(KG.createDeviceIdentity).not.toHaveBeenCalled()
+    expect(KG.registerDevice).not.toHaveBeenCalled()
+    expect(KG.createQRLogin).toHaveBeenCalledWith(expect.objectContaining({ dfid: 'DFID', mid: '290402895447160996760242034854185275797', guid: 'g' }))
+  })
+
+  it('无可用指纹（首次登录/旧 cookie）→ 仍重建并注册', async () => {
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: '', mid: '', dfid: '-', token: '', userid: '', vip_type: '', vip_token: '' },
+      loggedIn: false, savedAt: Date.now(),
+    }))
+    vi.mocked(KG.createDeviceIdentity).mockReturnValue({ guid: 'ng', mid: '99999999999999999999999999999999999999', dfid: '-' })
+    vi.mocked(KG.registerDevice).mockResolvedValue({ dfid: 'NEWDFID' })
+    vi.mocked(KG.createQRLogin).mockResolvedValue({ key: 'K2', imageDataUrl: 'data:image/png;base64,yy', expiresAt: Date.now() + 60000 })
+    const res = makeRes()
+    await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/start' }), res)
+    expect(res.status).toBe(200)
+    expect(KG.createDeviceIdentity).toHaveBeenCalled()
+    expect(KG.registerDevice).toHaveBeenCalled()
+    expect(KG.createQRLogin).toHaveBeenCalledWith(expect.objectContaining({ dfid: 'NEWDFID', mid: '99999999999999999999999999999999999999' }))
+  })
+})
+
+describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () => {
+  it('savedAt 超过 12h → 请求前先静默刷新换新 token', async () => {
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
+      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
+    }))
+    vi.mocked(KG.refreshSession).mockResolvedValue({ token: 'newtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(200)
+    // 主动续命在请求前刷新了一次（非失败补救）
+    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
+    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1)
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.session.token).toBe('newtok')
+  })
+
+  it('savedAt 新鲜（<12h）→ 不主动刷新，直接请求', async () => {
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([{ id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 1 }])
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(200)
+    expect(KG.refreshSession).not.toHaveBeenCalled()
+  })
+
+  it('主动续命遇设备不匹配（token 已死）→ 自动登出 + kgLoginDead，且保留指纹', async () => {
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
+      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
+    }))
+    vi.mocked(KG.refreshSession).mockRejectedValue(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(502)
+    const d = JSON.parse(res.body)
+    expect(d.kgLoginDead).toBe(true)
+    expect(KG.getMyPlaylists).not.toHaveBeenCalled() // 续命失败即死，不再发原请求
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(false)
+    expect(saved.session.dfid).toBe('DFID') // 指纹仍保留
   })
 })
