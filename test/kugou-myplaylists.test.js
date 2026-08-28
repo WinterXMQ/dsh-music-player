@@ -8,7 +8,7 @@
  * 收藏/自建 tags, real creators, and hide delete for collected/system playlists.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { getMyPlaylists, collectPlaylist } from '../lib/kugou.js'
+import { getMyPlaylists, collectPlaylist, getCollectedPlaylistSongs } from '../lib/kugou.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -59,6 +59,7 @@ const COLLECT_ENTRY = {
   list_create_listid: 69,
   list_create_userid: 1030901891,
   list_create_username: '周杰伦粉丝',
+  list_create_gid: 'collection_3_1030901891_69_0',
   intro: 'VIP歌单选取周杰伦150首歌曲',
   pic: 'http://c1.kgimg.com/custom/{size}/x.jpg',
   count: 150,
@@ -96,6 +97,51 @@ describe('getMyPlaylists 自建/收藏/系统默认区分', () => {
     const pls = await getMyPlaylists(SESSION)
     expect(pls[0].kind).toBe('own')
     expect(pls[0].isDefault).toBe(true)
+  })
+
+  it('系统默认歌单带 isDef/isLike：默认收藏 isDef=1、我喜欢 isDef=2', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].isDef).toBe(1) // 默认收藏
+    expect(pls[0].isLike).toBe(false)
+    expect(pls[1].isDef).toBe(2) // 我喜欢
+    expect(pls[1].isLike).toBe(true)
+  })
+
+  it('「我喜欢」（is_def=2）无 pic 时用内嵌爱心封面；默认收藏无 pic 保持空封面', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].cover).toBe('') // 默认收藏：接口无 pic → 空（前端显示音符占位）
+    expect(pls[1].cover).toMatch(/^data:image\/jpeg;base64,/) // 我喜欢：内嵌 QQ 爱心封面
+  })
+
+  it('REGRESSION: 默认收藏/自建歌单（is_def≠2）无 pic 时取各自第一首歌封面兜底，且带缓存', async () => {
+    // /v7/get_all_list 返回默认收藏(listid=5,is_def=1) + 自建歌单(listid=6,is_def=0)，均无 pic；
+    // /v4/get_list_all_file 返回歌曲（带 cover）
+    const songsCalls = []
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      const u = String(url)
+      if (u.includes('/v4/get_list_all_file')) {
+        songsCalls.push(u)
+        return { status: 200, text: async () => JSON.stringify({ status: 1, data: { info: [
+          { hash: 'AAAA', name: 'Beyond - 不再犹豫.mp3', singerinfo: [{ name: 'Beyond' }], timelen: 262000, cover: 'http://imge.kugou.com/stdmusic/{size}/20250213/x.jpg', album_id: 1 },
+        ] } }), json: async () => ({ status: 1, data: { info: [] } }) }
+      }
+      return { status: 200, text: async () => JSON.stringify({ status: 1, data: { info: [
+        { listid: 5, name: '默认收藏', type: 0, is_def: 1, count: 1 },
+        { listid: 6, name: '我的自建', type: 0, is_def: 0, count: 1 },
+      ] } }), json: async () => ({ status: 1, data: { info: [] } }) }
+    }))
+    const session = { ...SESSION, userid: '999' } // 独立 userid，隔离封面缓存
+    const pls = await getMyPlaylists(session)
+    // 歌曲 cover 走 kgCover：{size}→240、http→https；默认收藏与自建歌单都取到第一首歌封面
+    expect(pls.map((p) => [p.name, p.isDef])).toEqual([['默认收藏', 1], ['我的自建', 0]])
+    expect(pls[0].cover).toBe('https://imge.kugou.com/stdmusic/240/20250213/x.jpg')
+    expect(pls[1].cover).toBe('https://imge.kugou.com/stdmusic/240/20250213/x.jpg')
+    expect(songsCalls.length).toBe(2) // 两个无封面歌单各拉一次
+    const firstCalls = songsCalls.length
+    await getMyPlaylists(session)
+    expect(songsCalls.length).toBe(firstCalls) // 第二次命中缓存，不再拉取歌单歌曲
   })
 
   it('多条目混排：自建/收藏/系统默认各自正确标注', async () => {
@@ -164,5 +210,56 @@ describe('collectPlaylist（v5/add_list type=1 收藏别人歌单）', () => {
 
   it('未登录抛错', async () => {
     await expect(collectPlaylist({ specialId: '123', creatorId: '456', name: 'x' }, { mid: '123', token: '' })).rejects.toThrow('未登录')
+  })
+})
+
+describe('getMyPlaylists creatorGid（读收藏歌单歌曲的关键）', () => {
+  it('收藏歌单带 creatorGid（= 原歌单 global_specialid）', async () => {
+    stubMyPlaylists([COLLECT_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].creatorGid).toBe('collection_3_1030901891_69_0')
+  })
+
+  it('自建/系统默认歌单 creatorGid 为空', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].creatorGid).toBe('')
+    expect(pls[1].creatorGid).toBe('')
+  })
+})
+
+describe('getCollectedPlaylistSongs（/pubsongs/v2/get_other_list_file_nofilt）', () => {
+  // 模拟 get_other_list_file_nofilt：歌曲在 data.songs（不是 data.info！）。
+  function stubCollectedSongs(songs) {
+    let lastUrl = null
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      lastUrl = String(url)
+      return {
+        status: 200,
+        text: async () => JSON.stringify({ status: 1, data: { count: songs.length, songs } }),
+        json: async () => ({ status: 1, data: { count: songs.length, songs } }),
+      }
+    }))
+    return () => lastUrl
+  }
+
+  it('REGRESSION: 传 creatorGid 读收藏歌单歌曲（歌曲在 data.songs）', async () => {
+    const getLastUrl = stubCollectedSongs([
+      { hash: 'AAAA', name: 'Martin Jensen - All I Wanna Do', singerinfo: [{ name: 'Martin Jensen' }], timelen: 194000, add_mixsongid: 38400225, album_id: 1609448, relate_goods: [] },
+      { hash: 'BBBB', name: 'Sigala - Lullaby', singerinfo: [{ name: 'Sigala' }], timelen: 195000, mixsongid: 123, album_id: 1609, relate_goods: [] },
+    ])
+    const songs = await getCollectedPlaylistSongs('collection_3_1314415167_188_0', SESSION)
+    const u = getLastUrl()
+    expect(u).toContain('/pubsongs/v2/get_other_list_file_nofilt')
+    expect(u).toContain('global_collection_id=collection_3_1314415167_188_0')
+    expect(songs.length).toBe(2)
+    expect(songs[0].title).toBe('All I Wanna Do') // "歌手 - 标题" 拆开
+    expect(songs[0].artists).toEqual(['Martin Jensen'])
+    expect(songs[0].mixSongId).toBe(38400225)
+  })
+
+  it('缺 gid / 未登录抛错', async () => {
+    await expect(getCollectedPlaylistSongs('', SESSION)).rejects.toThrow('gid')
+    await expect(getCollectedPlaylistSongs('gid-x', { mid: '123', token: '' })).rejects.toThrow('未登录')
   })
 })

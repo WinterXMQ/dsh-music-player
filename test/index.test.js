@@ -282,6 +282,14 @@ describe('dsh-music-player host routes', () => {
       expect(data.root).toBe(musicDir)
       const names = data.tracks.map((t) => t.name).sort()
       expect(names).toEqual(['a.mp3', 'b.flac'])
+      // 关于页数据源：manifest 下发插件版本号、简介（package.json description）与酷狗登录态。
+      expect(typeof data.version).toBe('string')
+      expect(data.version.length).toBeGreaterThan(0)
+      expect(typeof data.description).toBe('string')
+      expect(data.description.length).toBeGreaterThan(0)
+      expect(data.kgLoggedIn).toBe(false)
+      // 未登录时 QQ 登录方式为空字符串（'qq'/'wx' 仅在登录成功后写入）。
+      expect(data.qqLoginFrom).toBe('')
     } finally { cleanup() }
   })
 
@@ -748,8 +756,14 @@ describe('dsh-music-player /dir route', () => {
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/dir?path=__drives__' }), res)
       const data = JSON.parse(res.body)
-      // On non-Windows the sentinel resolves to the POSIX root with no dirs.
       expect([null, '/']).toContain(data.up)
+      if (data.path === '/') {
+        // 回归防护：POSIX 下「本机」应列出真实的根目录内容，不能是空列表——
+        // 否则 macOS/Linux 点了「本机」后列表为空、再也选不了任何目录。
+        expect(Array.isArray(data.dirs)).toBe(true)
+        expect(Array.isArray(data.files)).toBe(true)
+        expect(data.dirs.length + data.files.length).toBeGreaterThan(0)
+      }
     } finally { cleanup() }
   })
 })
@@ -2079,6 +2093,8 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
       const manifest = JSON.parse(res.body)
       expect(manifest.ttsConfigured).toBe(true)
       expect(manifest.ttsReason).toBe('ok')
+      // 「关于」页展示的提供方名称来自 settings.yaml 里实际匹配到的 provider id。
+      expect(manifest.ttsProvider).toBe('xiaomi')
     } finally { cleanup() }
   })
 
