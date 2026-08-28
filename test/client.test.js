@@ -5028,6 +5028,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(colCard.textContent).toContain('收藏')
     expect(colCard.textContent).toContain('别人') // 收藏歌单展示原作者
     expect(defCard.textContent).toContain('默认')
+    // 系统默认（我喜欢）用主题色「默认」标签（与 QQ 一致），收藏用金色、自建用灰色。
+    expect(defCard.querySelector('.dsh-music-online-tag.default')).toBeTruthy()
+    expect(colCard.querySelector('.dsh-music-online-tag.collect')).toBeTruthy()
     // 自建 → ✕ 删除；收藏 → ☆ 取消收藏；系统默认无删除按钮
     expect(container.querySelectorAll('.dsh-music-qq-mine-del').length).toBe(2)
     const dels = [...container.querySelectorAll('.dsh-music-qq-mine-del')]
@@ -5910,6 +5913,58 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { mineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(container.textContent).toContain('我的收藏')
+  })
+
+  it('标识 QQ 我的歌单类别：我喜欢→默认、自建→自建', async () => {
+    qqLoggedIn = true
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/qq/my-playlists') return jsonRes({ ok: true, playlists: [
+        { id: '201', name: '我喜欢', creator: '我', trackCount: 14, source: 'qq', dirId: 201, tid: 201, isDefault: true, kind: 'default' },
+        { id: '5', name: '我的自建', creator: '我', trackCount: 5, source: 'qq', dirId: 5, tid: 5, isDefault: false, kind: 'own' },
+      ] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+    act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const mineTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '我的歌单')
+    act(() => { mineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const likeCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((c) => c.textContent.includes('我喜欢'))
+    const ownCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((c) => c.textContent.includes('我的自建'))
+    expect(likeCard).toBeTruthy()
+    expect(ownCard).toBeTruthy()
+    // 我喜欢（dirId=201）→ 主题色「默认」标签；自建 → 「自建」标签
+    const likeTag = likeCard.querySelector('.dsh-music-online-tag.default')
+    expect(likeTag).toBeTruthy()
+    expect(likeTag.textContent).toBe('默认')
+    const ownTag = ownCard.querySelector('.dsh-music-online-tag')
+    expect(ownTag).toBeTruthy()
+    expect(ownTag.textContent).toBe('自建')
   })
 
   it('deletes a user playlist via the 我的歌单 card ✕ button after confirmation', async () => {
