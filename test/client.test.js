@@ -2809,6 +2809,72 @@ describe('dsh-music-player client render smoke', () => {
     expect(fxEl.getAttribute('data-prev')).toBe('第一句歌词')
   })
 
+  it('REGRESSION: 长句跑马灯运行中切到短句，短句不再带 mq（mock 布局复现换行时序）', async () => {
+    const audios = []
+    class FxAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [
+        { t: 0, text: '这是一个非常非常长的歌词行用来触发跑马灯效果这是第二段很长很长', },
+        { t: 5, text: '短句' },
+      ],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', FxAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true; window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const audio = audios[0]
+      // mock 布局：clip 可视宽 100px；run.clientWidth 按当前文本长度估算（长句溢出、
+      // 短句不溢出）；run.scrollWidth 恒为大值——模拟 fx='slide'/'blur' 时新句 ::after
+      // 装着上一句长文本把 scrollWidth 撑大的场景。回归：测量必须读 clientWidth，
+      // 短句不因 scrollWidth 被撑大而误判为溢出。
+      const clipEl = container.querySelector('.dsh-music-bar-lyric')
+      const runEl = container.querySelector('.dsh-music-bar-lyric-run')
+      expect(clipEl).toBeTruthy()
+      expect(runEl).toBeTruthy()
+      Object.defineProperty(clipEl, 'clientWidth', { configurable: true, get: () => 100 })
+      Object.defineProperty(runEl, 'clientWidth', { configurable: true, get: () => Math.max(50, (runEl.textContent || '').length * 12) })
+      Object.defineProperty(runEl, 'scrollWidth', { configurable: true, get: () => 9999 })
+      // 触发重测：第一句长 → 应带 mq
+      window.dispatchEvent(new Event('resize'))
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('这是一个非常非常长的歌词行用来触发跑马灯效果这是第二段很长很长')
+      expect(container.querySelector('.dsh-music-bar-lyric-run.mq')).toBeTruthy()
+      // 切到第二句（很短）→ 不得再带 mq
+      audio.currentTime = 6
+      act(() => { audio.emit('timeupdate') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('短句')
+      expect(container.querySelector('.dsh-music-bar-lyric-run.mq')).toBeNull()
+    } finally { lyricFixture = null }
+  })
+
   it("fx 默认 = 'none'（无动效）：不选择任何动效时行为与旧版硬切完全一致", async () => {
     // 回归：默认值必须是无动效——未显式选择的用户不应看到任何换行动效。
     const { container, audio } = await mountMusicFx()
