@@ -975,6 +975,8 @@ describe('dsh-music-player client render smoke', () => {
       strokes.length = 0; current = []
       // 多跑几帧让波形缓动(0.3)与自适应增益收敛
       for (let f = 0; f < 12; f++) act(() => { rafCb() })
+      const canvas = container.querySelector('.dsh-music-viz')
+      expect(canvas).toBeTruthy()
       const last = strokes.slice(-3)
       expect(last.length).toBe(3)
       const span = (ys) => { let mn = Infinity, mx = -Infinity; for (const y of ys) { if (y < mn) mn = y; if (y > mx) mx = y; } return mx - mn }
@@ -982,12 +984,15 @@ describe('dsh-music-player client render smoke', () => {
       expect(span(last[0])).toBeGreaterThan(10) // low
       expect(span(last[1])).toBeLessThan(3)    // mid
       expect(span(last[2])).toBeLessThan(3)    // high
+      // 降采样包络：绘制按像素列取 min/max（每列 2 点）→ 每条线 2×画布宽 个顶点，
+      // 而不是时域全窗口的 2048 点（锁定降采样生效，60px 画布画 2048 点是纯浪费）。
+      expect(last[0].length).toBe(canvas.width * 2)
       // 关键回归：波形左右两端也要有真实振幅（时域滤波无窗函数，不会像 Hann 窗
-      // 那样把两端淡出到中线）。取低频线首/末各 300 个点（覆盖 >半周期，必含峰值），
-      // 两端都应明显偏离中线。
+      // 那样把两端淡出到中线）。包络保留每列极值 → 取低频线首/尾各 40 个点
+      //（覆盖 ~1/3 画布宽，必含峰值），两端都应明显偏离中线。
       const edgeDev = (ys) => { let mx = 0; for (const y of ys) { const d = Math.abs(y - 10); if (d > mx) mx = d; } return mx }
-      expect(edgeDev(last[0].slice(0, 300))).toBeGreaterThan(4)  // 左端有振幅
-      expect(edgeDev(last[0].slice(-300))).toBeGreaterThan(4)    // 右端有振幅
+      expect(edgeDev(last[0].slice(0, 40))).toBeGreaterThan(4)  // 左端有振幅
+      expect(edgeDev(last[0].slice(-40))).toBeGreaterThan(4)    // 右端有振幅
     } finally {
       HTMLCanvasElement.prototype.getContext = origGetCtx
     }
