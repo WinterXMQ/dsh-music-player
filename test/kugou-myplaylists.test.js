@@ -8,7 +8,7 @@
  * 收藏/自建 tags, real creators, and hide delete for collected/system playlists.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { getMyPlaylists } from '../lib/kugou.js'
+import { getMyPlaylists, collectPlaylist } from '../lib/kugou.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -111,5 +111,58 @@ describe('getMyPlaylists 自建/收藏/系统默认区分', () => {
 
   it('未登录抛错', async () => {
     await expect(getMyPlaylists({ mid: '123', token: '' })).rejects.toThrow('未登录')
+  })
+})
+
+describe('getMyPlaylists creatorId / originalId', () => {
+  it('收藏歌单带 originalId（被收藏的原 specialid）', async () => {
+    stubMyPlaylists([COLLECT_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].originalId).toBe('69')
+  })
+
+  it('自建/系统默认歌单 originalId 为空', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].originalId).toBe('')
+    expect(pls[1].originalId).toBe('')
+  })
+})
+
+describe('collectPlaylist（v5/add_list type=1 收藏别人歌单）', () => {
+  // 记录上次 v5/add_list 请求的 body + query，供断言收藏语义。
+  function stubCollect(response) {
+    let last = null
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      const u = new URL(String(url))
+      const body = JSON.parse(opts.body || '{}')
+      last = { url: String(url), params: Object.fromEntries(u.searchParams), body }
+      return { status: 200, text: async () => JSON.stringify(response), json: async () => response }
+    }))
+    return () => last
+  }
+
+  it('type=1 + list_create_userid/list_create_listid/gid（收藏别人歌单）', async () => {
+    const getLast = stubCollect({ status: 1, data: { listid: 77 } })
+    const r = await collectPlaylist({ specialId: '6409645', creatorId: '2132029040', creatorGid: 'collection_3_2132029040_287_0', name: '周杰伦必听热歌' }, SESSION)
+    const last = getLast()
+    expect(last.url).toContain('/cloudlist.service/v5/add_list')
+    expect(last.body.type).toBe(1) // 1 = 收藏别人歌单（0 = 自建）
+    expect(last.body.list_create_userid).toBe('2132029040')
+    expect(last.body.list_create_listid).toBe('6409645')
+    expect(last.body.list_create_gid).toBe('collection_3_2132029040_287_0')
+    expect(last.body.name).toBe('周杰伦必听热歌')
+    expect(last.body.userid).toBe('1785839222')
+    expect(r).toEqual({ id: 77, name: '周杰伦必听热歌', originalId: '6409645' })
+  })
+
+  it('缺少 specialid / 创建者 userid / gid 抛错', async () => {
+    await expect(collectPlaylist({ creatorId: '123', name: 'x' }, SESSION)).rejects.toThrow('specialid')
+    await expect(collectPlaylist({ specialId: '123', name: 'x' }, SESSION)).rejects.toThrow('创建者 userid')
+    await expect(collectPlaylist({ specialId: '123', creatorId: '456', name: '' }, SESSION)).rejects.toThrow('歌单名不能为空')
+  })
+
+  it('未登录抛错', async () => {
+    await expect(collectPlaylist({ specialId: '123', creatorId: '456', name: 'x' }, { mid: '123', token: '' })).rejects.toThrow('未登录')
   })
 })
