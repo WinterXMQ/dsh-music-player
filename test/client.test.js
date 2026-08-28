@@ -5191,6 +5191,144 @@ describe('dsh-music-player client render smoke', () => {
     expect(defCard.querySelector('.dsh-music-playlist-cover.empty .dsh-music-note path')).toBeTruthy()
   })
 
+  it('酷狗搜索输入框内部出现「✕」一键清除内容', async () => {
+    // 搜索框输入有内容时，输入框右内侧显示 ✕；点击后清空输入、✕ 消失。
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u.startsWith('/dsh-music/kg/search')) return jsonRes({ ok: true, results: [], page: 1, total: 0 })
+      if (u.startsWith('/dsh-music/kg/playlist-search')) return jsonRes({ ok: true, playlists: [] })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [] })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 切到「搜索」子 tab（默认落「我的歌单」）
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const input = kgPane.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+    // 清除钮始终渲染（避免有无 × 导致输入框宽度/UI 抖动），空内容时仅 .hidden 隐藏
+    expect(kgPane.querySelector('.dsh-music-qq-clear.hidden')).toBeTruthy()
+    expect(kgPane.querySelector('.dsh-music-qq-clear:not(.hidden)')).toBeNull()
+    // 输入内容 → ✕ 取消 .hidden 可见
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '周杰伦')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const clearBtn = kgPane.querySelector('.dsh-music-qq-clear:not(.hidden)')
+    expect(clearBtn).toBeTruthy()
+    expect(clearBtn.title).toBe('清空输入')
+    // 点 ✕ → 输入清空、✕ 回到 .hidden
+    act(() => { clearBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(input.value).toBe('')
+    expect(kgPane.querySelector('.dsh-music-qq-clear.hidden')).toBeTruthy()
+    expect(kgPane.querySelector('.dsh-music-qq-clear:not(.hidden)')).toBeNull()
+  })
+
+  it('REGRESSION: 搜索框与「歌曲/相关歌单」子tab在滚动容器之外，结果区滚动不引起整行偏移', async () => {
+    // 搜索结果出现竖向滚动条时，输入框所在行与子tab行不应被滚动条挤窄——它们必须
+    // 位于 .dsh-music-qq-body（唯一滚动容器）之外，只有结果内容在容器内滚动。
+    const baseFetch = fetchStub
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url)
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u.startsWith('/dsh-music/kg/search')) return jsonRes({ ok: true, results: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou' },
+        { id: 'KG2', hash: 'KG2', title: '酷狗二号', artists: ['歌手B'], source: 'kugou' },
+      ], page: 1, total: 2 })
+      if (u.startsWith('/dsh-music/kg/playlist-search')) return jsonRes({ ok: true, playlists: [
+        { id: 'P1', name: '周杰伦歌单', creator: '别人', trackCount: 5, source: 'kugou', cover: '' },
+      ] })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [] })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const searchTab = [...container.querySelectorAll('.dsh-music-qq-viewtab')].find((b) => b.textContent === '搜索')
+    act(() => { searchTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgPane = [...container.querySelectorAll('.dsh-music-qq-pane')].find((p) => (p.style.display || '') !== 'none') || container
+    const input = kgPane.querySelector('.dsh-music-qq-input')
+    expect(input).toBeTruthy()
+    // 输入关键词并搜索（歌曲 + 歌单都有结果 → 出现「歌曲/相关歌单」子tab）
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, '周杰伦')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const searchBtn = [...kgPane.querySelectorAll('.dsh-music-settings-btn')].find((b) => b.textContent === '搜索')
+    act(() => { searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 结果子tab 出现
+    expect([...kgPane.querySelectorAll('.dsh-music-qq-resulttab')].map((b) => b.textContent)).toEqual(['歌曲', '相关歌单'])
+    // 搜索框与子tab行都在 .dsh-music-qq-body 之外（body 内只有结果内容）
+    const body = kgPane.querySelector('.dsh-music-qq-body')
+    expect(body).toBeTruthy()
+    expect(body.querySelector('.dsh-music-qq-search')).toBeNull()
+    expect(body.querySelector('.dsh-music-qq-resulttabs')).toBeNull()
+    expect(body.querySelector('.dsh-music-track-row')).toBeTruthy() // 歌曲结果在滚动容器内
+    expect(kgPane.querySelector('.dsh-music-qq-search')).toBeTruthy()
+    expect(kgPane.querySelector('.dsh-music-qq-resulttabs')).toBeTruthy()
+  })
+
   it('collects a public KuGou playlist via the detail-page 收藏 button', async () => {
     // 公开歌单详情页头应有「☆ 收藏」按钮；点击后调 /dsh-music/kg/playlist-collect
     // （v5/add_list type=1），成功后置灰为「★ 已收藏」并刷新「我的歌单」。
