@@ -115,8 +115,9 @@ describe('getMyPlaylists 自建/收藏/系统默认区分', () => {
     expect(pls[1].cover).toMatch(/^data:image\/jpeg;base64,/) // 我喜欢：内嵌 QQ 爱心封面
   })
 
-  it('REGRESSION: 默认收藏无 pic 时取歌单第一首歌的封面兜底，且带缓存', async () => {
-    // /v7/get_all_list 返回默认收藏（listid=5，无 pic）；/v4/get_list_all_file 返回歌曲（带 cover）
+  it('REGRESSION: 默认收藏/自建歌单（is_def≠2）无 pic 时取各自第一首歌封面兜底，且带缓存', async () => {
+    // /v7/get_all_list 返回默认收藏(listid=5,is_def=1) + 自建歌单(listid=6,is_def=0)，均无 pic；
+    // /v4/get_list_all_file 返回歌曲（带 cover）
     const songsCalls = []
     vi.stubGlobal('fetch', vi.fn(async (url) => {
       const u = String(url)
@@ -128,13 +129,16 @@ describe('getMyPlaylists 自建/收藏/系统默认区分', () => {
       }
       return { status: 200, text: async () => JSON.stringify({ status: 1, data: { info: [
         { listid: 5, name: '默认收藏', type: 0, is_def: 1, count: 1 },
+        { listid: 6, name: '我的自建', type: 0, is_def: 0, count: 1 },
       ] } }), json: async () => ({ status: 1, data: { info: [] } }) }
     }))
     const session = { ...SESSION, userid: '999' } // 独立 userid，隔离封面缓存
     const pls = await getMyPlaylists(session)
-    expect(pls[0].name).toBe('默认收藏')
-    // 歌曲 cover 走 kgCover：{size}→240、http→https
+    // 歌曲 cover 走 kgCover：{size}→240、http→https；默认收藏与自建歌单都取到第一首歌封面
+    expect(pls.map((p) => [p.name, p.isDef])).toEqual([['默认收藏', 1], ['我的自建', 0]])
     expect(pls[0].cover).toBe('https://imge.kugou.com/stdmusic/240/20250213/x.jpg')
+    expect(pls[1].cover).toBe('https://imge.kugou.com/stdmusic/240/20250213/x.jpg')
+    expect(songsCalls.length).toBe(2) // 两个无封面歌单各拉一次
     const firstCalls = songsCalls.length
     await getMyPlaylists(session)
     expect(songsCalls.length).toBe(firstCalls) // 第二次命中缓存，不再拉取歌单歌曲
