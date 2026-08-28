@@ -3932,6 +3932,78 @@ describe('dsh-music-player client render smoke', () => {
     expect(container.textContent).toContain('酷狗音乐 · 无损')
   })
 
+  it('REGRESSION: 播放酷狗「我喜欢」歌单中的歌曲时，播放条爱心点亮（并可取消收藏）', async () => {
+    // 酷狗「我喜欢」（is_def=2）里的歌曲：checkKGFavForCurrent 经 /dsh-music/kg/liked
+    // 判断 hash 是否在集合中 → 点亮播放条爱心；再点爱心 → playlist-remove 取消收藏。
+    const baseFetch = fetchStub
+    const favCalls = []
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url); const o = opts || {}
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [
+        { id: '2', name: '我喜欢', kind: 'own', isDefault: true, isDef: 2, creator: '', trackCount: 1, source: 'kugou', cover: 'data:image/jpeg;base64,xx' },
+      ] })
+      if (u === '/dsh-music/kg/liked') return jsonRes({ ok: true, listId: 2, hashes: ['KG1'], files: [{ hash: 'KG1', fileId: 7 }] })
+      if (u.startsWith('/dsh-music/kg/my-playlist/')) return jsonRes({ ok: true, playlist: { songs: [
+        { id: 'KG1', hash: 'KG1', title: '酷狗一号', artists: ['歌手A'], source: 'kugou', fileId: 7 },
+      ] } })
+      if (u.startsWith('/dsh-music/kg/play/') && o.method === 'HEAD') return Promise.resolve({ ok: true, status: 200, headers: { get: (n) => n === 'X-DSH-KG-Quality' ? encodeURIComponent('无损') : null } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if ((u === '/dsh-music/kg/playlist-remove' || u === '/dsh-music/kg/playlist-add') && o.method === 'POST') {
+        try { favCalls.push({ url: u, body: JSON.parse(o.body || '{}') }) } catch {}
+        return jsonRes({ ok: true })
+      }
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const kgTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '酷狗音乐')
+    act(() => { kgTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 我的歌单 → 打开「我喜欢」歌单 → 点里面的歌
+    const plCard = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('我喜欢'))
+    act(() => { plCard.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('酷狗一号'))
+    act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 等 checkKGFavForCurrent 的 /liked 集合就绪后，爱心应点亮
+    const heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart).toBeTruthy()
+    expect(heart.title).toContain('酷狗「我喜欢」')
+    expect(container.querySelector('.dsh-music-bar-btn.fav.on')).toBeTruthy()
+    // 再点爱心 → 从酷狗「我喜欢」取消收藏（playlist-remove 带 listId + fileId）
+    act(() => { heart.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(favCalls.length).toBe(1)
+    expect(favCalls[0].url).toContain('/dsh-music/kg/playlist-remove')
+    expect(favCalls[0].body.listId).toBe(2)
+    expect(favCalls[0].body.fileId).toBe(7)
+    expect(container.querySelector('.dsh-music-bar-btn.fav.on')).toBeNull()
+  })
+
   it('shows the local music quality chip (FLAC · 无损) on the bar', async () => {
     // 本地音乐：扫描时解析文件头得到「格式 · 档位」，startPlay 把 track.quality 写入
     // currentQuality，播放条显示品质芯片；与在线 QQ 的「QQ音乐 · 无损」互不叠加。
@@ -4594,6 +4666,68 @@ describe('dsh-music-player client render smoke', () => {
     expect(audio.src).toContain('/dsh-music/kg/play/ABC')
     expect(audio.currentTime).toBeGreaterThanOrEqual(59.5) // 从 1:00 续播而非从头
     expect(audio.paused).toBe(false)
+  })
+
+  it('REGRESSION: 刷新恢复酷狗「我喜欢」歌曲时集合仍在拉取中 → 爱心最终点亮', async () => {
+    // 页面刷新后 restoreKGPlayback 恢复酷狗曲目时，/dsh-music/kg/liked 可能还在拉取
+    // （网络延迟）。checkKGFavForCurrent 必须等集合就绪后再判断（Promise 缓存共享同一
+    // 次请求），而不是在拉取中读到空集合把爱心误判为未收藏。
+    prefsServer = {
+      'dsh-music-kg-playback': JSON.stringify({
+        id: 'kg:ABC', name: '酷狗歌', artists: ['歌手'],
+        position: 0, duration: 240,
+        queue: [{ id: 'ABC', hash: 'ABC', title: '酷狗歌', artists: ['歌手'], source: 'kugou' }],
+        source: '我喜欢', ts: 999999999,
+      }),
+      'dsh-music-scope': JSON.stringify({ kind: 'kg' }),
+    }
+    const baseFetch = fetchStub
+    const likedCalls = []
+    let resolveLiked = null
+    const likedGate = new Promise((res) => { resolveLiked = res })
+    const fetcher = vi.fn((url, opts) => {
+      const u = String(url); const o = opts || {}
+      if (u === '/dsh-music/kg/status') return jsonRes({ loggedIn: true, userid: '123456' })
+      if (u === '/dsh-music/kg/liked') { likedCalls.push(u); return likedGate } // 挂起：模拟集合仍在拉取
+      if (u === '/dsh-music/kg/my-playlists') return jsonRes({ ok: true, playlists: [{ id: '2', name: '我喜欢', kind: 'own', isDef: 2, isDefault: true, trackCount: 1, source: 'kugou', cover: '' }] })
+      if (u.startsWith('/dsh-music/kg/play/') && o.method === 'HEAD') return Promise.resolve({ ok: true, status: 200, headers: { get: (n) => n === 'X-DSH-KG-Quality' ? encodeURIComponent('无损') : null } })
+      if (u.startsWith('/dsh-music/kg/play/')) return jsonRes({ ok: true })
+      if (u.startsWith('/dsh-music/kg/lyric')) return jsonRes({ ok: true, lrc: [], wordLines: [] })
+      return baseFetch(url, opts)
+    })
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetcher)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 等 restore 与登录检测都触发 /liked（此时集合仍挂起）
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    const nameSpan = container.querySelector('.dsh-music-bar-name')
+    expect(nameSpan).toBeTruthy()
+    expect(nameSpan.textContent).toContain('酷狗歌') // 酷狗曲目已恢复
+    expect(likedCalls.length).toBeGreaterThan(0) // /liked 已发起
+    // 集合此刻就绪 → 爱心应点亮（Promise 缓存保证所有等待者拿到同一份结果）
+    await act(async () => { resolveLiked(jsonRes({ ok: true, listId: 2, hashes: ['ABC'], files: [{ hash: 'ABC', fileId: 7 }] })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+    const heart = container.querySelector('.dsh-music-bar-btn.fav')
+    expect(heart).toBeTruthy()
+    expect(container.querySelector('.dsh-music-bar-btn.fav.on')).toBeTruthy() // 爱心应点亮
   })
 
   it('restores KuGou playback over an older QQ record (newest timestamp wins)', async () => {

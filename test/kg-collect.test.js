@@ -139,3 +139,47 @@ describe('酷狗收藏歌单：走 get_other_list_file_nofilt（creatorGid）读
     expect(JSON.parse(res.body).playlist.songs.length).toBe(1)
   })
 })
+
+describe('酷狗「我喜欢」集合接口（/dsh-music/kg/liked，供播放条爱心点亮）', () => {
+  it('返回我喜欢歌单的 listId + 歌曲 hash 集合 + hash→fileId 映射', async () => {
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([
+      { id: '2', name: '我喜欢', kind: 'own', isLike: true, isDef: 2, trackCount: 44, cover: 'data:image/jpeg;base64,xx' },
+      { id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 2, cover: '' },
+    ])
+    vi.mocked(KG.getMyPlaylistSongs).mockResolvedValue([
+      { id: 'a', hash: 'AAAA', title: 'All I Wanna Do', fileId: 2, source: 'kugou' },
+      { id: 'b', hash: 'BBBB', title: 'Lullaby', fileId: 3, source: 'kugou' },
+    ])
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/liked' }), res)
+    expect(res.status).toBe(200)
+    const d = JSON.parse(res.body)
+    expect(d.ok).toBe(true)
+    expect(d.listId).toBe(2)
+    expect(d.hashes).toEqual(['AAAA', 'BBBB'])
+    expect(d.files).toEqual([{ hash: 'AAAA', fileId: 2 }, { hash: 'BBBB', fileId: 3 }])
+    expect(KG.getMyPlaylistSongs).toHaveBeenCalledWith('2', expect.anything())
+  })
+
+  it('没有我喜欢歌单时返回空集合（ok:true）', async () => {
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([
+      { id: '3', name: '自建', kind: 'own', isLike: false, isDef: 0, trackCount: 2, cover: '' },
+    ])
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/liked' }), res)
+    expect(res.status).toBe(200)
+    const d = JSON.parse(res.body)
+    expect(d.ok).toBe(true)
+    expect(d.listId).toBe(0)
+    expect(d.hashes).toEqual([])
+    expect(d.files).toEqual([])
+    expect(KG.getMyPlaylistSongs).not.toHaveBeenCalled()
+  })
+
+  it('未登录返回 401', async () => {
+    writeFileSync(booted.cookieFile, JSON.stringify({ session: { token: '', userid: '' }, loggedIn: false, savedAt: Date.now() }))
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/liked' }), res)
+    expect(res.status).toBe(401)
+  })
+})
