@@ -282,6 +282,14 @@ describe('dsh-music-player host routes', () => {
       expect(data.root).toBe(musicDir)
       const names = data.tracks.map((t) => t.name).sort()
       expect(names).toEqual(['a.mp3', 'b.flac'])
+      // 关于页数据源：manifest 下发插件版本号、简介（package.json description）与酷狗登录态。
+      expect(typeof data.version).toBe('string')
+      expect(data.version.length).toBeGreaterThan(0)
+      expect(typeof data.description).toBe('string')
+      expect(data.description.length).toBeGreaterThan(0)
+      expect(data.kgLoggedIn).toBe(false)
+      // 未登录时 QQ 登录方式为空字符串（'qq'/'wx' 仅在登录成功后写入）。
+      expect(data.qqLoginFrom).toBe('')
     } finally { cleanup() }
   })
 
@@ -2079,6 +2087,8 @@ describe('dsh-music-player TTS chunk synthesis & diagnostics', () => {
       const manifest = JSON.parse(res.body)
       expect(manifest.ttsConfigured).toBe(true)
       expect(manifest.ttsReason).toBe('ok')
+      // 「关于」页展示的提供方名称来自 settings.yaml 里实际匹配到的 provider id。
+      expect(manifest.ttsProvider).toBe('xiaomi')
     } finally { cleanup() }
   })
 

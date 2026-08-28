@@ -6991,7 +6991,7 @@ describe('dsh-music-player client render smoke', () => {
     const fetcher = vi.fn((url, opts) => {
       const u = String(url)
       if (u === '/dsh-music/qq/login/start') return jsonRes({ ok: true, key: 'type=wx&uuid=U&state=S', image: 'data:image/jpeg;base64,xxx', mode: 'wx' })
-      if (u.includes('/dsh-music/qq/login/check')) return jsonRes({ ok: true, status: 'success', uin: '123456', nickname: '我' })
+      if (u.includes('/dsh-music/qq/login/check')) return jsonRes({ ok: true, status: 'success', uin: '123456', nickname: '我', loginFrom: 'wx' })
       return baseFetch(u, opts)
     })
     vi.stubGlobal('fetch', fetcher)
@@ -7022,6 +7022,12 @@ describe('dsh-music-player client render smoke', () => {
       vi.useRealTimers()
       await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
       expect(JSON.parse(prefsServer['dsh-music-qq-ui']).layer).toBe('main')
+      // 登录方式随登录流程实时同步到 store：切到「关于」页应显示「已登录（微信）」
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const qqRow = [...container.querySelectorAll('.dsh-music-about-row')].find((r) => r.textContent.includes('QQ音乐'))
+      expect(qqRow.textContent).toContain('已登录（微信）')
     } finally {
       vi.useRealTimers()
       vi.unstubAllGlobals()
@@ -7265,6 +7271,146 @@ describe('dsh-music-player client render smoke', () => {
     expect(segShown2.findIndex((b) => b.classList.contains('on'))).toBe(3) // karaoke restored
     // 频谱样式也在跨重启后恢复为之前选择的「波形图」。
     expect(segShown2.findIndex((b) => b.textContent === '波形图' && b.classList.contains('on'))).toBe(5)
+  })
+
+  it('renders the 关于 tab with version, run status, and repo info from the manifest', async () => {
+    // manifest 携带版本号 / TTS·QQ·酷狗登录态 → 关于页展示这些运行状态；
+    // 并确认关于页不显示「选择音乐目录」设置块（与系统配置页同规格）。
+    manifest = {
+      ...baseManifest(),
+      version: '0.6.7',
+      description: '来自 package.json 的插件简介。',
+      ttsConfigured: true, ttsReason: 'ok', ttsProvider: 'xiaomi-mimo',
+      qqLoggedIn: true, qqUin: '123456', qqNickname: '测试用户', qqLoginFrom: 'wx',
+      kgLoggedIn: true,
+      books: [{ id: 'b1', name: '测试小说.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }],
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    // 侧栏存在「关于」tab；点击后展示关于页
+    const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+    expect(aboutTab).toBeTruthy()
+    act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-about')).toBeTruthy()
+
+    // 标题 + 版本徽章（取自 manifest）
+    expect(container.querySelector('.dsh-music-about-title').textContent).toContain('DSH音乐播放器')
+    expect(container.querySelector('.dsh-music-about-ver').textContent).toBe('v0.6.7')
+
+    // 布局：插件名称 + 简介渲染在滚动列表之外（.dsh-music-about-top），不随卡片滚动；
+    // 卡片组（.dsh-music-about）位于 .dsh-music-list 滚动列表内，滚动条只出现在卡片区。
+    const top = container.querySelector('.dsh-music-about-top')
+    const list = container.querySelector('.dsh-music-list')
+    const about = container.querySelector('.dsh-music-about')
+    expect(top).toBeTruthy()
+    expect(about).toBeTruthy()
+    expect(top.textContent).toContain('DSH音乐播放器')
+    expect(top.textContent).toContain('v0.6.7')
+    // 简介来自 manifest 下发的 package.json description（非硬编码）
+    expect(top.textContent).toContain('来自 package.json 的插件简介。')
+    // 头部在滚动列表之外（list 不包含头部），卡片在列表之内
+    expect(list.contains(top)).toBe(false)
+    expect(list.contains(about)).toBe(true)
+    expect(about.querySelector('.dsh-music-about-card-title').textContent).toBe('运行状态')
+    // 头部不含卡片内容（简介里出现的「音乐目录」不算，改用卡片独有文本判断），
+    // 列表内的卡片区含全部卡片
+    expect(top.textContent).not.toContain('运行状态')
+    expect(top.textContent).not.toContain('曲库歌曲')
+    expect(about.textContent).toContain('音乐目录')
+    expect(about.textContent).not.toContain('功能特性')
+    // 仓库地址是可跳转外链（<a target="_blank" rel="noopener noreferrer">）
+    const repoLink = container.querySelector('.dsh-music-about-link')
+    expect(repoLink).toBeTruthy()
+    expect(repoLink.tagName).toBe('A')
+    expect(repoLink.getAttribute('href')).toBe('https://github.com/kendu76/dsh-music-player')
+    expect(repoLink.getAttribute('target')).toBe('_blank')
+    expect(repoLink.getAttribute('rel')).toBe('noopener noreferrer')
+    expect(repoLink.textContent).toBe('github.com/kendu76/dsh-music-player')
+
+    // 运行状态行：目录 / 计数 / TTS / 登录态都来自 manifest 快照
+    const rowText = [...container.querySelectorAll('.dsh-music-about-row')].map((r) => r.textContent)
+    expect(rowText.some((t) => t.includes('音乐目录') && t.includes('/music'))).toBe(true)
+    expect(rowText.some((t) => t.includes('小说目录') && t.includes('/books'))).toBe(true)
+    expect(rowText.some((t) => t.includes('曲库歌曲') && t.includes('1 首'))).toBe(true)
+    expect(rowText.some((t) => t.includes('本地小说') && t.includes('1 本'))).toBe(true)
+    expect(rowText.some((t) => t.includes('AI 讲书') && t.includes('已配置') && t.includes('xiaomi-mimo'))).toBe(true)
+    expect(rowText.some((t) => t.includes('QQ音乐') && t.includes('已登录（微信）') && !t.includes('测试用户'))).toBe(true)
+    expect(rowText.some((t) => t.includes('酷狗音乐') && t.includes('已登录'))).toBe(true)
+
+    // 版权 / 仓库信息
+    expect(container.textContent).toContain('github.com/kendu76/dsh-music-player')
+    expect(container.textContent).toContain('MIT')
+
+    // 关于页不显示「选择音乐目录」设置块（与系统配置页同规格）
+    expect(container.textContent).not.toContain('选择音乐目录')
+  })
+
+  it('关于页在 AI 讲书未配置时直接显示「未配置」', async () => {
+    // 未配置 TTS 提供方：AI 讲书行显示简洁的「未配置」，不展示详细原因文案。
+    manifest = { ...baseManifest(), ttsConfigured: false, ttsReason: '未找到xiaomi提供方。请在DSH模型设置中配置。' }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+    act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+
+    const ttsRow = [...container.querySelectorAll('.dsh-music-about-row')]
+      .find((r) => r.textContent.includes('AI 讲书'))
+    expect(ttsRow).toBeTruthy()
+    expect(ttsRow.textContent).toContain('未配置')
+    // 不显示 Host 的详细诊断原因
+    expect(ttsRow.textContent).not.toContain('未找到xiaomi提供方')
+    expect(ttsRow.textContent).not.toContain('请在DSH模型设置中配置')
+  })
+
+  it('关于页的 QQ 登录状态区分微信/QQ 扫码，且不显示昵称或 QQ 号', async () => {
+    // 登录方式随 manifest 下发：'wx' 显示「已登录（微信）」、'qq' 显示「已登录（QQ）」、
+    // 未知（空）只显示「已登录」；昵称 / QQ 号一律不展示。
+    const qqRowText = async (extra) => {
+      manifest = { ...baseManifest(), qqLoggedIn: true, qqUin: '123456', qqNickname: '测试用户', ...extra }
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      await bootClient()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      return [...container.querySelectorAll('.dsh-music-about-row')]
+        .find((r) => r.textContent.includes('QQ音乐')).textContent
+    }
+    expect(await qqRowText({ qqLoginFrom: 'wx' })).toContain('已登录（微信）')
+    expect(await qqRowText({ qqLoginFrom: 'qq' })).toContain('已登录（QQ）')
+    expect(await qqRowText({ qqLoginFrom: '' })).toContain('已登录')
+    // 三种情况都不显示昵称 / QQ 号
+    for (const from of ['wx', 'qq', '']) {
+      const t = await qqRowText({ qqLoginFrom: from })
+      expect(t).not.toContain('测试用户')
+      expect(t).not.toContain('123456')
+    }
   })
 
   it('renders the 沉浸感 slider defaulting to 50% and persists/restores a custom value', async () => {
