@@ -8,7 +8,7 @@
  * 收藏/自建 tags, real creators, and hide delete for collected/system playlists.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { getMyPlaylists, collectPlaylist } from '../lib/kugou.js'
+import { getMyPlaylists, collectPlaylist, getCollectedPlaylistSongs } from '../lib/kugou.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -59,6 +59,7 @@ const COLLECT_ENTRY = {
   list_create_listid: 69,
   list_create_userid: 1030901891,
   list_create_username: '周杰伦粉丝',
+  list_create_gid: 'collection_3_1030901891_69_0',
   intro: 'VIP歌单选取周杰伦150首歌曲',
   pic: 'http://c1.kgimg.com/custom/{size}/x.jpg',
   count: 150,
@@ -164,5 +165,56 @@ describe('collectPlaylist（v5/add_list type=1 收藏别人歌单）', () => {
 
   it('未登录抛错', async () => {
     await expect(collectPlaylist({ specialId: '123', creatorId: '456', name: 'x' }, { mid: '123', token: '' })).rejects.toThrow('未登录')
+  })
+})
+
+describe('getMyPlaylists creatorGid（读收藏歌单歌曲的关键）', () => {
+  it('收藏歌单带 creatorGid（= 原歌单 global_specialid）', async () => {
+    stubMyPlaylists([COLLECT_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].creatorGid).toBe('collection_3_1030901891_69_0')
+  })
+
+  it('自建/系统默认歌单 creatorGid 为空', async () => {
+    stubMyPlaylists([OWN_ENTRY, FAV_ENTRY])
+    const pls = await getMyPlaylists(SESSION)
+    expect(pls[0].creatorGid).toBe('')
+    expect(pls[1].creatorGid).toBe('')
+  })
+})
+
+describe('getCollectedPlaylistSongs（/pubsongs/v2/get_other_list_file_nofilt）', () => {
+  // 模拟 get_other_list_file_nofilt：歌曲在 data.songs（不是 data.info！）。
+  function stubCollectedSongs(songs) {
+    let lastUrl = null
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      lastUrl = String(url)
+      return {
+        status: 200,
+        text: async () => JSON.stringify({ status: 1, data: { count: songs.length, songs } }),
+        json: async () => ({ status: 1, data: { count: songs.length, songs } }),
+      }
+    }))
+    return () => lastUrl
+  }
+
+  it('REGRESSION: 传 creatorGid 读收藏歌单歌曲（歌曲在 data.songs）', async () => {
+    const getLastUrl = stubCollectedSongs([
+      { hash: 'AAAA', name: 'Martin Jensen - All I Wanna Do', singerinfo: [{ name: 'Martin Jensen' }], timelen: 194000, add_mixsongid: 38400225, album_id: 1609448, relate_goods: [] },
+      { hash: 'BBBB', name: 'Sigala - Lullaby', singerinfo: [{ name: 'Sigala' }], timelen: 195000, mixsongid: 123, album_id: 1609, relate_goods: [] },
+    ])
+    const songs = await getCollectedPlaylistSongs('collection_3_1314415167_188_0', SESSION)
+    const u = getLastUrl()
+    expect(u).toContain('/pubsongs/v2/get_other_list_file_nofilt')
+    expect(u).toContain('global_collection_id=collection_3_1314415167_188_0')
+    expect(songs.length).toBe(2)
+    expect(songs[0].title).toBe('All I Wanna Do') // "歌手 - 标题" 拆开
+    expect(songs[0].artists).toEqual(['Martin Jensen'])
+    expect(songs[0].mixSongId).toBe(38400225)
+  })
+
+  it('缺 gid / 未登录抛错', async () => {
+    await expect(getCollectedPlaylistSongs('', SESSION)).rejects.toThrow('gid')
+    await expect(getCollectedPlaylistSongs('gid-x', { mid: '123', token: '' })).rejects.toThrow('未登录')
   })
 })
