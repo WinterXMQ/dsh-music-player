@@ -788,6 +788,93 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('opens the panel on double-clicking the bar name (track) or the idle title', async () => {
+    // 双击播放条左侧名称（有曲目时的 .dsh-music-bar-name，或停止状态时的
+    // .dsh-music-bar-idle「DSH音乐播放器」）→ 打开面板弹窗（再双击关闭，toggle）。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    // 停止状态（无曲目）：双击标题 → 打开
+    const idle = container.querySelector('.dsh-music-bar-idle')
+    expect(idle).toBeTruthy()
+    expect(panelEl.style.display).toBe('none')
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 再双击 → 关闭（toggle）
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 播放本地曲目：先打开面板点 a.mp3（复用 idle 双击打开面板）
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const nameEl = container.querySelector('.dsh-music-bar-name-text')
+    expect(nameEl).toBeTruthy()
+    // 播放后面板仍打开 → 双击歌名文本 → 关闭（toggle）
+    act(() => { nameEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 再双击歌名 → 重新打开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+  })
+
+  it('double-clicking the quality badge does NOT open the panel (track name/artist do)', async () => {
+    // Regression: onDoubleClick 挂在名称容器（.dsh-music-bar-name）上，歌名/歌手/章节
+    // 等附属信息双击都打开面板；唯独音质徽章（.dsh-music-bar-src）不触发——它是纯
+    // 信息展示，双击不应打开面板（由 togglePanelOnName 内的 closest 排除）。
+    manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损', artists: ['周杰伦'] }] }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 打开面板 → 播放 a.flac（带音质徽章 + 歌手名）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.flac'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    // 关闭面板 → 初始为关（此时播放列表按钮 title 已变为「关闭播放列表」）
+    act(() => { container.querySelector('button[title="关闭播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 音质徽章存在
+    const badge = container.querySelector('.dsh-music-bar-src')
+    expect(badge).toBeTruthy()
+    expect(badge.textContent).toContain('FLAC · 无损')
+    // 双击音质徽章 → 面板仍关闭（不触发）
+    act(() => { badge.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 双击歌手名（.dsh-music-bar-artist）→ 面板打开（附属信息也可触发，仅徽章除外）
+    const artistEl = container.querySelector('.dsh-music-bar-artist')
+    expect(artistEl).toBeTruthy()
+    expect(artistEl.textContent).toContain('周杰伦')
+    act(() => { artistEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 再双击歌手名 → 关闭（toggle）
+    act(() => { artistEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+  })
+
   it('dims the whole bar to 50% opacity on mouse-leave (1s delay), full opacity on hover', async () => {
     // 后台静默播放效果：鼠标移入 → 播放条完全不透明（去 dimmed）；鼠标移出 1s 后 →
     // 控件组折叠的同时播放条变半透明（加 dimmed）。两者同一状态源（barHover）同步变化。
