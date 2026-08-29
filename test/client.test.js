@@ -2709,6 +2709,74 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('does not orphan a closing bracket （）at the start of a subtitle line (treated like a closing quote)', async () => {
+    // A closing full-width bracket must ride the current line exactly like a
+    // closing quote ”” does — never start a line on its own. This is the paired
+    // punctuation handling introduced for （）／【】.
+    const audios = []
+    class BracketAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '括号测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他（拿着一本很厚的书，然后慢慢翻开第一页。）站了起来。'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', BracketAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('括号测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      const seen = new Set()
+      for (let t = 0; t <= 9.9; t += 0.05) {
+        audio.currentTime = t
+        act(() => { audio.emit('timeupdate') })
+        const el = container.querySelector('.dsh-music-bar-lyric')
+        if (el && el.textContent) seen.add(el.textContent)
+      }
+      // the fixture wraps into multiple lines (content > 20 chars)
+      expect(seen.size).toBeGreaterThan(1)
+      // the closing bracket is absorbed into the current line — never orphaning
+      // at the start of a line
+      for (const line of seen) expect(line.trim()).not.toMatch(/^[）】〉》]/)
+      // and the full content is intact (the pair survives)
+      expect([...seen].join('')).toContain('）')
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
   it('weights AI 讲书 subtitle timing by line length so a long line is not swapped out early', async () => {
     // Two lines: a long first sentence and a 2-char second. TTS duration ∝ chars,
     // so the long line should fill most of the chunk. At p=0.6 the uniform "1/N"
