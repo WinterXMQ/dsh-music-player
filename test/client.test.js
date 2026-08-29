@@ -2282,7 +2282,8 @@ describe('dsh-music-player client render smoke', () => {
     // so the reader has finished it — the book must JUMP to the NEXT chunk (from=3),
     // not re-listen chunk 2 and never force currentTime to the clamped 20s end.
     audio.duration = 20
-    act(() => { audio.emit('durationchange') })
+    // 切块经 playBookFrom 的「等采集管线拆除落定再换 src」微任务，先 flush 再断言。
+    await act(async () => { audio.emit('durationchange'); await Promise.resolve() })
     audio.currentTime = 0.1
     act(() => { audio.emit('timeupdate') })
     expect(audio.src).toContain('from=3')        // jumped forward to chunk 3
