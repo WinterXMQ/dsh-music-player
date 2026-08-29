@@ -1239,6 +1239,50 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     // each chunk stays within the cap
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
   })
+
+  // Regression: body prose must not fragment into runs of consecutive short
+  // chunks. Two guards: ，、 now break segments (a comma-heavy description is
+  // packed into ~150-char blocks instead of one giant segment hitting
+  // splitOversize), and splitOversize takes any tail that fits in a single
+  // chunk whole (no re-subdividing the shrinking tail at clause pauses).
+  it('keeps a comma-heavy long description as clean ~150 blocks (no consecutive short chunks)', () => {
+    const desc = '极长的描述句'.repeat(23) + '，然后没有句号地继续往下写，直到这里才终于告一段落。'
+    const n = norm(['开头几个短句。', desc, '结尾两个短句。', '最后一句。'].join('\n'))
+    const { chunks } = splitBookChunks(n, [])
+    const strip = (s) => s.replace(/\s+/g, '')
+    expect(strip(chunks.join(''))).toBe(strip(n)) // 文本保留（仅空白折叠）
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    // 主块接近上限，而不是整段碎成多个小片
+    expect(Math.max(...chunks.map((c) => c.length))).toBeGreaterThanOrEqual(120)
+    // 不存在"连续>=2个 <40字"的碎块（正文不应出现连续少内容分块）
+    for (let i = 0; i < chunks.length; i++) {
+      if (chunks[i].length < 40) {
+        let j = i
+        while (j < chunks.length && chunks[j].length < 40) j++
+        if (j - i >= 2) throw new Error('出现连续短块: ' + chunks.slice(i, j).join('|'))
+        i = j
+      }
+    }
+  })
+
+  it('does not break a quoted dialogue at its internal ，、 (atomic quote still holds)', () => {
+    const n = norm('他说：“你来了吗？我等你，很久了。”她点点头。')
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.join('')).toBe(n) // 引号内逗号不分离对话与叙述
+    const holder = chunks.find((c) => c.includes('“'))
+    expect(holder).toBeTruthy()
+    expect(holder).toContain('你来了吗？我等你，很久了。”')
+  })
+
+  it('takes the tail of an over-long unpunctuated sentence as one chunk', () => {
+    const n = norm('无标点'.repeat(60)) // 180 chars, no break punctuation
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.join('')).toBe(n)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    expect(Math.max(...chunks.map((c) => c.length))).toBeGreaterThanOrEqual(150)
+    // tail is a single block (150, 30) rather than several tiny pieces
+    expect(chunks.length).toBe(2)
+  })
 })
 
 describe('dsh-music-player parseLrc', () => {
