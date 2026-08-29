@@ -3023,6 +3023,309 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricFixture = null }
   })
 
+  it('double-clicking the bar lyric opens a full-lyric panel that highlights the current line', async () => {
+    // 双击播放条歌词/字幕 → 打开歌词面板：显示完整歌词，当前行高亮并随播放推进
+    // 更新；再双击可关闭。面板默认居中、独立于播放面板。
+    const audios = []
+    class LpAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', LpAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      expect(lyricPanel).toBeTruthy()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 默认关闭
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      expect(lyricPanelEl).toBeTruthy()
+      expect(lyricPanelEl.style.display).toBe('none')
+      // 双击播放条歌词 → 打开面板
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(barLyric).toBeTruthy()
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 面板显示完整两行歌词，第一行（当前）高亮
+      const lines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')]
+      expect(lines.length).toBe(2)
+      expect(lines[0].textContent).toContain('第一句歌词')
+      expect(lines[1].textContent).toContain('第二句歌词')
+      expect(lines[0].classList.contains('active')).toBe(true)
+      expect(lines[1].classList.contains('active')).toBe(false)
+      // 推进到第二句 → 高亮随播放更新
+      audio.currentTime = 6
+      act(() => { audio.emit('timeupdate') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lines2 = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')]
+      expect(lines2[0].classList.contains('active')).toBe(false)
+      expect(lines2[1].classList.contains('active')).toBe(true)
+      // 再双击播放条歌词 → 关闭
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('keeps the lyric panel always open on outside clicks (only the close button dismisses it)', async () => {
+    // 歌词面板「常驻显示」：不再有钉住按钮，点击外部不关闭面板（一直显示），
+    // 只有手动点关闭按钮才消失。双击歌词可开关面板。
+    const audios = []
+    class PinAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', PinAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      // 已移除钉住按钮
+      const pinBtn = container.querySelector('.dsh-music-lyric-panel button[title^="钉住"]')
+      expect(pinBtn).toBeNull()
+      // 双击歌词 → 打开面板
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 点击外部 → 面板保持打开（一直显示）
+      act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 再双击歌词 → 关闭（toggle）
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+      // 重新打开 → 只有手动点关闭按钮才关闭
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      const closeBtn = container.querySelector('.dsh-music-lyric-panel button[title="关闭"]')
+      expect(closeBtn).toBeTruthy()
+      act(() => { closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('restores the lyric panel position from the Host prefs after a refresh', async () => {
+    // 回归：歌词面板位置曾漏出 Host 白名单，刷新后 GET /prefs 快照无此键 →
+    // 面板回到默认位置。预置位置后重开面板应恢复持久化的 left/top/width/height。
+    const audios = []
+    class PosAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }],
+    }
+    prefsServer = { 'dsh-music-lyric-panel-pos': JSON.stringify({ x: 123, y: 87, w: 430, h: 470 }) }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', PosAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      // 预置位置已恢复：内联 geometry 为持久化值（而非默认居中）
+      expect(lyricPanelEl.style.left).toBe('123px')
+      expect(lyricPanelEl.style.top).toBe('87px')
+      expect(lyricPanelEl.style.width).toBe('430px')
+      expect(lyricPanelEl.style.height).toBe('470px')
+      expect(lyricPanelEl.style.transform).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('updates the pinned lyric panel from AI 讲书 subtitles to QQ lyrics on source switch', async () => {
+    // Regression: 歌词面板一直钉住时，从 AI 讲书切到 QQ 音乐播放，面板必须刷新为
+    // QQ 歌词，而不是残留小说字幕。startQQPlayback 直接调 loadQQLyric（不经
+    // loadLyricForTrack），若 loadQQLyric 不先 resetLyric，残留的 subtitleLines 会
+    // 让 syncLyricPanelData 继续以字幕生成歌词行。
+    const audios = []
+    class SwitchAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '切换测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '第一章的旁白内容。第二句旁白。'
+    qqLoggedIn = true
+    qqLyricFixture = {
+      ok: true, hasLyric: true,
+      lrc: [{ t: 0, text: '告白气球' }, { t: 3, text: '亲爱的 爱上你' }],
+      trans: [],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', SwitchAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // ---- 1) AI 讲书播放：填充字幕 ----
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('切换测试'))
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      audio.currentTime = 0
+      act(() => { audio.emit('timeupdate') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      // 双击字幕打开歌词面板 → 显示小说字幕
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(barLyric).toBeTruthy()
+      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      const bookLines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')].map((el) => el.textContent)
+      expect(bookLines.join('')).toContain('第一章的旁白内容')
+      // ---- 2) 切到 QQ 音乐播放：startQQPlayback（绕过 loadLyricForTrack）----
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 歌词面板应刷新为 QQ 歌词，不再显示小说字幕
+      const qqLines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')].map((el) => el.textContent)
+      expect(qqLines.join('')).toContain('告白气球')
+      expect(qqLines.join('')).toContain('亲爱的 爱上你')
+      expect(qqLines.join('')).not.toContain('第一章的旁白内容')
+      // 面板仍保持打开（钉住/未钉住都不应因切歌而关闭）
+      expect(lyricPanelEl.style.display).not.toBe('none')
+    } finally {
+      bookTextFixture = ''
+      bookMetaSections = []
+      qqLyricFixture = null
+    }
+  })
+
   // 歌词换行动效装置：boot 后播放单曲目 a.mp3，返回可 emit timeupdate 的主 audio。
   // fxPref 为空时保持默认 none（无动效）；否则以 Host pref 预置 dsh-music-lyric-fx。
   // lrc 可覆盖默认两行测试词（构造间奏等场景）。

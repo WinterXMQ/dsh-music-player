@@ -480,6 +480,31 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts the lyric-panel pos pref through the allowlist (persistence regression)', async () => {
+    // 回归：歌词/字幕面板的位置曾漏出 Host 白名单，POST 被 sanitizePrefs 静默丢弃，
+    // 表现为「刷新后歌词面板回到默认位置」。位置必须能存、能 GET 回读。
+    const { handler, cleanup } = boot()
+    try {
+      const pos = JSON.stringify({ x: 120, y: 80, w: 420, h: 480 })
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-lyric-panel-pos': pos,
+        } }) }),
+        res,
+      )
+      const d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      expect(d.prefs['dsh-music-lyric-panel-pos']).toBe(pos)
+      // GET 回读：快照里确实持久化了位置
+      const g = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/prefs' }), g)
+      const gd = JSON.parse(g.body)
+      expect(gd.prefs['dsh-music-lyric-panel-pos']).toBe(pos)
+      expect(JSON.parse(gd.prefs['dsh-music-lyric-panel-pos']).x).toBe(120)
+    } finally { cleanup() }
+  })
+
   it('lists .txt novels as books in the manifest', async () => {
     // Books share the default root with music until a separate book root is set.
     const { handler, musicDir, cleanup } = boot({
