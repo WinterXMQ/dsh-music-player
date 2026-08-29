@@ -393,6 +393,41 @@ describe('dsh-music-player client render smoke', () => {
     expect(histItems.some((b) => b.textContent === '刀郎')).toBe(true)
   })
 
+  it('shows the current lyric line on the bar right after a paused refresh restore (no resume needed)', async () => {
+    // Regression: play a track with a .lrc -> pause (lyric shows) -> refresh. On
+    // boot the track is restored paused (audio never loaded, no timeupdate), so
+    // the lyric data was only loaded lazily on ▶ and the bar stayed blank. It
+    // must instead show the line at the restored position immediately.
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'local',
+      lrc: [
+        { t: 0, text: '第一句歌词' },
+        { t: 10, text: '第二句歌词' },
+        { t: 40, text: '第三句歌词' },
+        { t: 60, text: '第四句歌词' },
+      ],
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-playback lyric fetch -> updateLyric (restored position 42s)
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const lyric = container.querySelector('.dsh-music-bar-lyric')
+    expect(lyric).toBeTruthy()
+    // at the restored paused position (42s) the current line is the t=40 one
+    expect(lyric.textContent).toContain('第三句歌词')
+  })
+
   it('restores prefs even when the Host prefs fetch is slow (panel mounts before snapshot)', async () => {
     // Timing regression: in the real browser the /dsh-music/prefs fetch resolves
     // after the React tree mounts, so the QQ panel's mount-time history read sees
