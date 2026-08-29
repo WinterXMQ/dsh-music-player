@@ -696,6 +696,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(barEl).toBeTruthy()
     const controls = container.querySelector('.dsh-music-bar-controls')
     expect(controls).toBeTruthy()
+    // 右端热区：鼠标移入它才触发按钮滑入（播放条其它区域不触发）。
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    expect(hotspot).toBeTruthy()
     // 默认隐藏：无 .on，闲置态时长一并隐藏（新行为：时长只在操作时显示）
     expect(controls.classList.contains('on')).toBe(false)
     expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
@@ -708,21 +711,22 @@ describe('dsh-music-player client render smoke', () => {
     // 用假定时器控制 1s 滑出延迟。
     vi.useFakeTimers()
     try {
-      // 鼠标进入播放条 → 控制按钮滑入（加 .on）。React 的 onMouseEnter/onMouseLeave
-      // 由原生 mouseover/mouseout 事件驱动（relatedTarget 为空 = 从外部进入/离开）。
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 鼠标进入播放条右端热区（.dsh-music-bar-hotspot）→ 控制按钮滑入（加 .on）。
+      // React 的 onMouseEnter/onMouseLeave 由原生 mouseover/mouseout 事件驱动
+      // （relatedTarget 为空 = 从外部进入/离开）。整个播放条其它区域不再触发。
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 操作态：时长显示
       expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标离开 → 1s 延迟内按钮仍保持展开（防止误移出）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 延迟内重新进入 → 取消隐藏，按钮保持展开
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1500) })
       expect(controls.classList.contains('on')).toBe(true)
       // 离开后超过 1s → 按钮滑出隐藏（去 .on）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true) // 还在延迟内
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
@@ -734,6 +738,54 @@ describe('dsh-music-player client render smoke', () => {
     // 收藏/播放控制按钮在 controls 容器内
     expect(controls.querySelector('.dsh-music-bar-btn.fav')).toBeTruthy()
     expect([...controls.querySelectorAll('.dsh-music-bar-btn')].some((b) => b.title === '播放/暂停')).toBe(true)
+  })
+
+  it('only the right-end hotspot triggers the control buttons (bar left/middle area does NOT)', async () => {
+    // Regression: 鼠标事件只挂在播放条右端热区（.dsh-music-bar-hotspot）上，播放条
+    // 左/中部（歌名、歌词等区域）不再触发按钮组滑入——减少工作时误触发。同时验证
+    // 从热区移到按钮（relatedTarget 仍在按钮组内）不会误收起。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    const nameEl = container.querySelector('.dsh-music-bar-name')
+    expect(barEl).toBeTruthy()
+    expect(controls).toBeTruthy()
+    expect(hotspot).toBeTruthy()
+    expect(nameEl).toBeTruthy()
+    // 默认隐藏
+    expect(controls.classList.contains('on')).toBe(false)
+    // 鼠标移入播放条左中部（歌名区域）→ 不触发展开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    expect(controls.classList.contains('on')).toBe(false)
+    expect(barEl.classList.contains('dimmed')).toBe(true)
+    // 鼠标移入右端热区 → 触发滑入
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    expect(controls.classList.contains('on')).toBe(true)
+    expect(barEl.classList.contains('dimmed')).toBe(false)
+    // 从热区移到按钮（relatedTarget 在按钮组内）→ 保持展开，不误收起
+    vi.useFakeTimers()
+    try {
+      const playBtn = [...controls.querySelectorAll('.dsh-music-bar-btn')].find((b) => b.title === '播放/暂停')
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: playBtn })) })
+      act(() => { vi.advanceTimersByTime(1500) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 从按钮组移出播放条（relatedTarget 在播放条外）→ 1s 后收起
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(controls.classList.contains('on')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('dims the whole bar to 50% opacity on mouse-leave (1s delay), full opacity on hover', async () => {
@@ -752,27 +804,28 @@ describe('dsh-music-player client render smoke', () => {
     const barEl = container.querySelector('.dsh-music-bar')
     expect(barEl).toBeTruthy()
     const controls = container.querySelector('.dsh-music-bar-controls')
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
     // 初始（未悬停）：半透明 dimmed
     expect(barEl.classList.contains('dimmed')).toBe(true)
     // 闲置态时长隐藏（新行为）
     expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     vi.useFakeTimers()
     try {
-      // 鼠标移入 → 立即不透明（去 dimmed），控件组随之滑入
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 鼠标移入右端热区 → 立即不透明（去 dimmed），控件组随之滑入
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       expect(controls.classList.contains('on')).toBe(true)
       // 操作态时长显示（新行为）
       expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标移出 → 1s 延迟内仍不透明（防误移出）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       // 延迟内重新进入 → 取消隐藏，保持不透明
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1500) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       // 离开超过 1s → 控件组折叠，同时播放条变半透明
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
       expect(barEl.classList.contains('dimmed')).toBe(true)
@@ -797,20 +850,20 @@ describe('dsh-music-player client render smoke', () => {
     const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
     act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
     const controls = container.querySelector('.dsh-music-bar-controls')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     expect(controls.classList.contains('on')).toBe(true)
     // 打开模式弹窗（默认模式=顺序播放）
     const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '顺序播放')
     expect(modeBtn).toBeTruthy()
     act(() => { modeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // 弹窗打开 → 即使鼠标移出播放条（mouseout 触发 mouseleave），按钮仍保持展开。
+    // 弹窗打开 → 即使鼠标移出右端控件区（mouseout 触发 mouseleave），按钮仍保持展开。
     // 先开假定时器，让 mouseleave 安排的 1s 收起定时器成为假定时器，可被推进触发。
     vi.useFakeTimers()
     try {
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 鼠标移出超过 1s：barHover 变为 false，但弹窗打开期间 .on 仍由 anyPopOpen 保持
       act(() => { vi.advanceTimersByTime(1200) })
@@ -1261,8 +1314,8 @@ describe('dsh-music-player client render smoke', () => {
     const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
     act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     // ---- 音量弹窗：打开后点击弹窗内部不应关闭 ----
     const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
     act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -1606,9 +1659,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(bookRow).toBeTruthy()
     act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
-    expect(barEl).toBeTruthy()
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    expect(hotspot).toBeTruthy()
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     // 打开音量弹窗 → 讲书（book）模式
     const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
     expect(volBtn).toBeTruthy()
@@ -2812,18 +2865,19 @@ describe('dsh-music-player client render smoke', () => {
       expect(lyric.getAttribute('data-src')).toBe('local')
       // 歌词在 .dsh-music-bar-controls（时长）之前、频谱之后（DOM 顺序断言）
       const controls = container.querySelector('.dsh-music-bar-controls')
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
       const idxLyric = [...barEl.children].indexOf(lyric)
       const idxControls = [...barEl.children].indexOf(controls)
       expect(idxLyric).toBeGreaterThanOrEqual(0)
       expect(idxLyric).toBeLessThan(idxControls)
-      // 使用态（鼠标进入、控件组滑入）：歌词收起
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 使用态（鼠标进入右端热区、控件组滑入）：歌词收起
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
       // 离开超过 1s → 回到闲置态 → 歌词恢复
       vi.useFakeTimers()
       try {
-        act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+        act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
         act(() => { vi.advanceTimersByTime(1200) })
       } finally { vi.useRealTimers() }
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
@@ -4718,6 +4772,8 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const barEl = container.querySelector('.dsh-music-bar')
+      const controls = container.querySelector('.dsh-music-bar-controls')
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
       expect(barEl.classList.contains('dimmed')).toBe(true)
       // 闲置态 → 歌词显示当前行（currentTime=0 → 第一行，无翻译）
       const lyric = container.querySelector('.dsh-music-bar-lyric')
@@ -4728,8 +4784,8 @@ describe('dsh-music-player client render smoke', () => {
       const lyric2 = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric2.textContent).toContain('亲爱的 爱上你')
       expect(lyric2.textContent).toContain('darling I love you')
-      // 使用态（悬停）→ 歌词收起（与本地歌词同规格）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 使用态（悬停右端热区）→ 歌词收起（与本地歌词同规格）
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
     } finally { qqLyricFixture = null }
   })
@@ -5151,9 +5207,9 @@ describe('dsh-music-player client render smoke', () => {
     const nameSpan = container.querySelector('.dsh-music-bar-name')
     expect(nameSpan).toBeTruthy()
     expect(nameSpan.textContent).toContain('告白气球')
-    // 播放条处于闲置（半透明）态时不显示时长；mouseover 激活后显示恢复的位置。
-    const barEl = container.querySelector('.dsh-music-bar')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    // 播放条处于闲置（半透明）态时不显示时长；鼠标移入右端热区激活后显示恢复的位置。
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     const timeSpan = container.querySelector('.dsh-music-bar-time')
     expect(timeSpan).toBeTruthy()
     expect(timeSpan.textContent).toBe('1:00 / 4:00')
