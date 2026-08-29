@@ -256,7 +256,10 @@ async function bootClient() {
 // 上不足以等完这串异步，find() 会返回 undefined、后续 dispatchEvent 抛
 // TypeError。这里用真实定时器轮询，对时序免疫（仅用于真实定时器测试，
 // 不用于 vi.useFakeTimers() 的用例）。超时仍找不到则抛出以暴露问题。
-async function waitForText(container, selector, text, timeout = 1500) {
+// 默认 5s：2 核 CI runner 上全文件 142 用例并行跑时，fetch 链 + React 提交
+// 可能被 CPU 争抢拖过 1.5s（实测出现过一次推荐歌单 viewtab 超时假失败）；
+// 正常路径毫秒级返回，超时只影响真失败时多久报错。
+async function waitForText(container, selector, text, timeout = 5000) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const el = [...container.querySelectorAll(selector)].find((b) => b.textContent === text);
@@ -582,9 +585,59 @@ describe('dsh-music-player client render smoke', () => {
     const map = JSON.parse(prefsServer['dsh-music-books-playback'] || '{}')
     expect(map['凡人修仙传.txt']).toBeTruthy()
     expect(map['凡人修仙传.txt'].pos).toBe(42)
-    expect(map['凡人修仙传.txt'].ts).toBe(111)
+    // 恢复阶段会把 ts 保鲜到当前时间（restoreBookPlayback 与 QQ 恢复同理：
+    // 「更新时间戳，避免被当作旧数据」），但迁移本身不得丢失/破坏条目。
+    expect(map['凡人修仙传.txt'].ts).toBeGreaterThan(111)
     // the legacy single-book key is gone from the browser store
     expect(localStorage.getItem('dsh-music-book-playback')).toBeNull()
+  })
+
+  it('restores the book (not newer-saved music) when the last activity was a book, and marks scope book', async () => {
+    // Regression（刷新后讲书被切到音乐）: 讲书从不写 scope='book'（恢复快捷分支是
+    // 死代码），而本地音乐的 restorePlayback 每次刷新都会把自己的 ts 重写为当前时间
+    // → 讲书在 scope/时间戳两个信号上都系统性输给音乐。现在讲书恢复/播放会写
+    // scope='book'（快捷分支生效）并保鲜自己的 ts：即使音乐记录的 ts 更新，刷新后
+    // 也必须恢复讲书而不是音乐。
+    const bm = baseManifest()
+    manifest = { ...bm, ttsConfigured: true, books: [{ id: 'b1', name: '续播范畴测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '续播范畴测试文本。'
+    prefsServer = {
+      'dsh-music-scope': JSON.stringify({ kind: 'book' }),
+      // 音乐记录 ts 比讲书「新」：旧逻辑会据此恢复音乐
+      'dsh-music-playback': JSON.stringify({ id: bm.tracks[0].id, name: bm.tracks[0].name, position: 1, duration: 9, ts: 9999999999999 }),
+      'dsh-music-books-playback': JSON.stringify({
+        '续播范畴测试.txt': { from: 1, base: 5, pos: 2, total: 25, ts: 8888888888 },
+      }),
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar)) })
+    // 恢复的是讲书（不是 ts 更新的音乐）
+    expect(container.querySelector('.dsh-music-bar').textContent).toContain('续播范畴测试')
+    // 讲书恢复把范畴信号落盘为 'book'（下次刷新快捷分支直接命中）。pref 走 Host
+    // 防抖 flush（localStorage 只读不写），等 flush 周期后断言 Host 侧的值。
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-scope'] || 'null')).toEqual({ kind: 'book' })
+    bookTextFixture = ''
   })
 
   it('stays in the work state (no dim / controls expanded) when there is no playback content', async () => {
@@ -693,6 +746,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(barEl).toBeTruthy()
     const controls = container.querySelector('.dsh-music-bar-controls')
     expect(controls).toBeTruthy()
+    // 右端热区：鼠标移入它才触发按钮滑入（播放条其它区域不触发）。
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    expect(hotspot).toBeTruthy()
     // 默认隐藏：无 .on，闲置态时长一并隐藏（新行为：时长只在操作时显示）
     expect(controls.classList.contains('on')).toBe(false)
     expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
@@ -705,21 +761,22 @@ describe('dsh-music-player client render smoke', () => {
     // 用假定时器控制 1s 滑出延迟。
     vi.useFakeTimers()
     try {
-      // 鼠标进入播放条 → 控制按钮滑入（加 .on）。React 的 onMouseEnter/onMouseLeave
-      // 由原生 mouseover/mouseout 事件驱动（relatedTarget 为空 = 从外部进入/离开）。
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 鼠标进入播放条右端热区（.dsh-music-bar-hotspot）→ 控制按钮滑入（加 .on）。
+      // React 的 onMouseEnter/onMouseLeave 由原生 mouseover/mouseout 事件驱动
+      // （relatedTarget 为空 = 从外部进入/离开）。整个播放条其它区域不再触发。
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 操作态：时长显示
       expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标离开 → 1s 延迟内按钮仍保持展开（防止误移出）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 延迟内重新进入 → 取消隐藏，按钮保持展开
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1500) })
       expect(controls.classList.contains('on')).toBe(true)
       // 离开后超过 1s → 按钮滑出隐藏（去 .on）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true) // 还在延迟内
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
@@ -731,6 +788,172 @@ describe('dsh-music-player client render smoke', () => {
     // 收藏/播放控制按钮在 controls 容器内
     expect(controls.querySelector('.dsh-music-bar-btn.fav')).toBeTruthy()
     expect([...controls.querySelectorAll('.dsh-music-bar-btn')].some((b) => b.title === '播放/暂停')).toBe(true)
+  })
+
+  it('only the right-end hotspot triggers the control buttons (bar left/middle area does NOT)', async () => {
+    // Regression: 鼠标事件只挂在播放条右端热区（.dsh-music-bar-hotspot）上，播放条
+    // 左/中部（歌名、歌词等区域）不再触发按钮组滑入——减少工作时误触发。同时验证
+    // 从热区移到按钮（relatedTarget 仍在按钮组内）不会误收起。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const barEl = container.querySelector('.dsh-music-bar')
+    const controls = container.querySelector('.dsh-music-bar-controls')
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    const nameEl = container.querySelector('.dsh-music-bar-name')
+    expect(barEl).toBeTruthy()
+    expect(controls).toBeTruthy()
+    expect(hotspot).toBeTruthy()
+    expect(nameEl).toBeTruthy()
+    // 默认隐藏
+    expect(controls.classList.contains('on')).toBe(false)
+    // 鼠标移入播放条左中部（歌名区域）→ 不触发展开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    expect(controls.classList.contains('on')).toBe(false)
+    expect(barEl.classList.contains('dimmed')).toBe(true)
+    // 鼠标移入右端热区 → 触发滑入
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    expect(controls.classList.contains('on')).toBe(true)
+    expect(barEl.classList.contains('dimmed')).toBe(false)
+    // 从热区移到按钮（relatedTarget 在按钮组内）→ 保持展开，不误收起
+    vi.useFakeTimers()
+    try {
+      const playBtn = [...controls.querySelectorAll('.dsh-music-bar-btn')].find((b) => b.title === '播放/暂停')
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: playBtn })) })
+      act(() => { vi.advanceTimersByTime(1500) })
+      expect(controls.classList.contains('on')).toBe(true)
+      // 从按钮组移出播放条（relatedTarget 在播放条外）→ 1s 后收起
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body })) })
+      act(() => { vi.advanceTimersByTime(1000) })
+      expect(controls.classList.contains('on')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('opens the panel on clicking the bar name (track) or double-clicking the idle title', async () => {
+    // 单击播放条左侧名称（有曲目时的 .dsh-music-bar-name）→ 打开面板弹窗（再单击关闭，
+    // toggle）；停止状态时的 .dsh-music-bar-idle「DSH音乐播放器」保持双击打开（未改）。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    // 停止状态（无曲目）：双击标题 → 打开
+    const idle = container.querySelector('.dsh-music-bar-idle')
+    expect(idle).toBeTruthy()
+    expect(panelEl.style.display).toBe('none')
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 再双击 → 关闭（toggle）
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 播放本地曲目：先打开面板点 a.mp3（复用 idle 双击打开面板）
+    act(() => { idle.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const nameEl = container.querySelector('.dsh-music-bar-name-text')
+    expect(nameEl).toBeTruthy()
+    // 播放后面板仍打开 → 单击歌名文本 → 关闭（toggle）
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 再单击歌名 → 重新打开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+  })
+
+  it('clicking the quality badge does NOT open the panel (track name/artist do)', async () => {
+    // Regression: 单击事件挂在名称容器（.dsh-music-bar-name）上，歌名/歌手/章节
+    // 等附属信息单击都打开面板；唯独音质徽章（.dsh-music-bar-src）不触发——它是纯
+    // 信息展示，单击不应打开面板（由 togglePanelOnName 内的 closest 排除）。
+    manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损', artists: ['周杰伦'] }] }
+    vi.resetModules()
+    lastFilesUrl = null
+    await bootClient()
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 打开面板 → 播放 a.flac（带音质徽章 + 歌手名）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.flac'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl).toBeTruthy()
+    // 关闭面板 → 初始为关（此时播放列表按钮 title 已变为「关闭播放列表」）
+    act(() => { container.querySelector('button[title="关闭播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 音质徽章存在
+    const badge = container.querySelector('.dsh-music-bar-src')
+    expect(badge).toBeTruthy()
+    expect(badge.textContent).toContain('FLAC · 无损')
+    // 单击音质徽章 → 面板仍关闭（不触发）
+    act(() => { badge.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+    // 单击歌手名（.dsh-music-bar-artist）→ 面板打开（附属信息也可触发，仅徽章除外）
+    const artistEl = container.querySelector('.dsh-music-bar-artist')
+    expect(artistEl).toBeTruthy()
+    expect(artistEl.textContent).toContain('周杰伦')
+    act(() => { artistEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 再单击歌手名 → 关闭（toggle）
+    act(() => { artistEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+  })
+
+  it('keeps the name-click toggle working when the real mousedown→click order fires', async () => {
+    // 回归：播放面板有全局 mousedown「点外部关闭」处理器。真实浏览器里 mousedown
+    // 恒先于 click：面板打开时单击歌名，mousedown 先把面板关掉，随后的 click toggle
+    // 又把它重新打开 → 表现为「再单击还是打开」。名称区已加入豁免名单（与右侧
+    // 按钮组同理），本用例按真实顺序派发 mousedown + click，断言 toggle 正常关闭。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 打开面板 → 播放 a.mp3（歌名区出现，面板保持打开）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl.style.display).not.toBe('none')
+    const nameEl = container.querySelector('.dsh-music-bar-name')
+    expect(nameEl).toBeTruthy()
+    // mousedown（点外部关闭的入口事件）→ 名称区豁免：面板保持打开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 随后的 click → toggle 正常关闭（不再被「mousedown 先关 + click 重开」抵消）
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
   })
 
   it('dims the whole bar to 50% opacity on mouse-leave (1s delay), full opacity on hover', async () => {
@@ -749,27 +972,28 @@ describe('dsh-music-player client render smoke', () => {
     const barEl = container.querySelector('.dsh-music-bar')
     expect(barEl).toBeTruthy()
     const controls = container.querySelector('.dsh-music-bar-controls')
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
     // 初始（未悬停）：半透明 dimmed
     expect(barEl.classList.contains('dimmed')).toBe(true)
     // 闲置态时长隐藏（新行为）
     expect(container.querySelector('.dsh-music-bar-time')).toBeNull()
     vi.useFakeTimers()
     try {
-      // 鼠标移入 → 立即不透明（去 dimmed），控件组随之滑入
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 鼠标移入右端热区 → 立即不透明（去 dimmed），控件组随之滑入
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       expect(controls.classList.contains('on')).toBe(true)
       // 操作态时长显示（新行为）
       expect(container.querySelector('.dsh-music-bar-time')).toBeTruthy()
       // 鼠标移出 → 1s 延迟内仍不透明（防误移出）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       // 延迟内重新进入 → 取消隐藏，保持不透明
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1500) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       // 离开超过 1s → 控件组折叠，同时播放条变半透明
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       act(() => { vi.advanceTimersByTime(1000) })
       expect(controls.classList.contains('on')).toBe(false)
       expect(barEl.classList.contains('dimmed')).toBe(true)
@@ -794,20 +1018,20 @@ describe('dsh-music-player client render smoke', () => {
     const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
     act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
     const controls = container.querySelector('.dsh-music-bar-controls')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     expect(controls.classList.contains('on')).toBe(true)
     // 打开模式弹窗（默认模式=顺序播放）
     const modeBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '顺序播放')
     expect(modeBtn).toBeTruthy()
     act(() => { modeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    // 弹窗打开 → 即使鼠标移出播放条（mouseout 触发 mouseleave），按钮仍保持展开。
+    // 弹窗打开 → 即使鼠标移出右端控件区（mouseout 触发 mouseleave），按钮仍保持展开。
     // 先开假定时器，让 mouseleave 安排的 1s 收起定时器成为假定时器，可被推进触发。
     vi.useFakeTimers()
     try {
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+      act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
       expect(controls.classList.contains('on')).toBe(true)
       // 鼠标移出超过 1s：barHover 变为 false，但弹窗打开期间 .on 仍由 anyPopOpen 保持
       act(() => { vi.advanceTimersByTime(1200) })
@@ -1258,8 +1482,8 @@ describe('dsh-music-player client render smoke', () => {
     const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
     act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     // ---- 音量弹窗：打开后点击弹窗内部不应关闭 ----
     const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
     act(() => { volBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -1603,9 +1827,9 @@ describe('dsh-music-player client render smoke', () => {
     expect(bookRow).toBeTruthy()
     act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const barEl = container.querySelector('.dsh-music-bar')
-    expect(barEl).toBeTruthy()
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    expect(hotspot).toBeTruthy()
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     // 打开音量弹窗 → 讲书（book）模式
     const volBtn = [...container.querySelectorAll('.dsh-music-mode-trigger')].find((b) => b.title === '音量')
     expect(volBtn).toBeTruthy()
@@ -2070,6 +2294,76 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { audio.emit('durationchange') })
     act(() => { audio.emit('timeupdate') })
     expect(audio.currentTime).toBeLessThan(1)
+    bookTextFixture = ''
+  })
+
+  it('advances when `ended` arrives during resume buffering, and swallows only the duplicate after a real advance', async () => {
+    // Regression（冷启动续播残留卡死）: 恢复续播的块被重合成得比保存位置短时，旧实现
+    // 在 togglePlay 里「时长未知就提前 seek」→ 被 browser 钳到块尾，`ended` 会在
+    // 「AI 合成中」缓冲态（尚未切块过）到达，被旧逻辑 `if (bookBuffering) return`
+    // 无条件吞掉 → 不切块、不报错、缓冲随后被 play promise 清掉 → 永久「没声音、
+    // 字幕不动」。正确行为：①时长未知绝不提前 seek；②缓冲态中、尚无切块发生时，
+    // ended 是「本块真结束」→ 清缓冲并切块；③切块后紧随的重复 ended 才是陈旧事件
+    // （吞掉，防连跳两块）。
+    const audios = []
+    class ClampStallAudio extends FakeAudio {
+      constructor() { super(); audios.push(this); this._resolvePlay = null }
+      play() {
+        this.paused = false
+        this._playPromise = new Promise((res) => { this._resolvePlay = res })
+        return this._playPromise
+      }
+      resolvePlay() { if (this._resolvePlay) { const r = this._resolvePlay; this._resolvePlay = null; r() } }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '钳尾续播测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '钳尾续播测试文本。'
+    prefsServer = { 'dsh-music-books-playback': JSON.stringify({
+      '钳尾续播测试.txt': { from: 2, base: 400, pos: 5, total: 25, ts: 999999999 },
+    }) }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', ClampStallAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // ▶ 续播 → src 指向恢复块；时长未知时绝不提前 seek（旧实现在此把越界位置塞进
+    // currentTime、随后被钳到块尾埋雷）。
+    act(() => { container.querySelector('button[title="播放/暂停"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=2')
+    expect(audio.currentTime).toBe(0) // duration unknown → no early seek
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeTruthy()
+    // 模拟钳尾：ended 带着缓冲态直接到达（没有 timeupdate/onDur 补救的窗口）
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=3') // jumped to the next chunk, NOT stalled
+    // 切块后紧随的陈旧重复 ended（旧块的）必须被吞掉——不连跳两块
+    act(() => { audio.emit('ended') })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(audio.src).toContain('from=3')
+    // 新块真正开始播放 → 缓冲清除，此后 ended 恢复为真实切块语义
+    audio.resolvePlay()
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(container.querySelector('.dsh-music-bar-buffering')).toBeNull()
     bookTextFixture = ''
   })
 
@@ -2739,24 +3033,388 @@ describe('dsh-music-player client render smoke', () => {
       expect(lyric.getAttribute('data-src')).toBe('local')
       // 歌词在 .dsh-music-bar-controls（时长）之前、频谱之后（DOM 顺序断言）
       const controls = container.querySelector('.dsh-music-bar-controls')
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
       const idxLyric = [...barEl.children].indexOf(lyric)
       const idxControls = [...barEl.children].indexOf(controls)
       expect(idxLyric).toBeGreaterThanOrEqual(0)
       expect(idxLyric).toBeLessThan(idxControls)
-      // 使用态（鼠标进入、控件组滑入）：歌词收起
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 使用态（鼠标进入右端热区、控件组滑入）：歌词收起
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(barEl.classList.contains('dimmed')).toBe(false)
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
       // 离开超过 1s → 回到闲置态 → 歌词恢复
       vi.useFakeTimers()
       try {
-        act(() => { barEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
+        act(() => { controls.dispatchEvent(new MouseEvent('mouseout', { bubbles: true })) })
         act(() => { vi.advanceTimersByTime(1200) })
       } finally { vi.useRealTimers() }
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(barEl.classList.contains('dimmed')).toBe(true)
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeTruthy()
     } finally { lyricFixture = null }
+  })
+
+  it('clicking the bar lyric opens a full-lyric panel that highlights the current line', async () => {
+    // 单击播放条歌词/字幕 → 打开歌词面板：显示完整歌词，当前行高亮并随播放推进
+    // 更新；再单击可关闭。面板默认居中、独立于播放面板。
+    const audios = []
+    class LpAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', LpAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      expect(lyricPanel).toBeTruthy()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 默认关闭
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      expect(lyricPanelEl).toBeTruthy()
+      expect(lyricPanelEl.style.display).toBe('none')
+      // 透明模式默认开启 → 面板根节点带 ghost 类（CSS 隐去外壳背景/边框/阴影）
+      expect(lyricPanelEl.classList.contains('ghost')).toBe(true)
+      // 单击播放条歌词 → 打开面板
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(barLyric).toBeTruthy()
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 面板显示完整两行歌词，第一行（当前）高亮
+      const lines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')]
+      expect(lines.length).toBe(2)
+      expect(lines[0].textContent).toContain('第一句歌词')
+      expect(lines[1].textContent).toContain('第二句歌词')
+      expect(lines[0].classList.contains('active')).toBe(true)
+      expect(lines[1].classList.contains('active')).toBe(false)
+      // 推进到第二句 → 高亮随播放更新
+      audio.currentTime = 6
+      act(() => { audio.emit('timeupdate') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lines2 = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')]
+      expect(lines2[0].classList.contains('active')).toBe(false)
+      expect(lines2[1].classList.contains('active')).toBe(true)
+      // 再单击播放条歌词 → 关闭
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('drops the ghost class when the lyric-panel transparency pref is off (restore solid shell)', async () => {
+    // 透明模式回归：dsh-music-lyric-panel-ghost='0' 时面板根节点不带 ghost 类，
+    // 恢复普通外壳（背景/边框/阴影由 CSS 提供，这里只验证类的开关随偏好联动）。
+    const audios = []
+    class GhostOffAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      prefsServer = { 'dsh-music-lyric-panel-ghost': '0' }
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', GhostOffAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      expect(lyricPanelEl.classList.contains('ghost')).toBe(false)
+      // 空闲时 audio 未被使用也无妨——本用例只关心类名联动。
+      void audio
+    } finally { lyricFixture = null }
+  })
+
+  it('keeps the lyric panel always open on outside clicks (only the close button dismisses it)', async () => {
+    // 歌词面板「常驻显示」：不再有钉住按钮，点击外部不关闭面板（一直显示），
+    // 只有手动点关闭按钮才消失。单击歌词可开关面板。
+    const audios = []
+    class PinAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', PinAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      // 已移除钉住按钮
+      const pinBtn = container.querySelector('.dsh-music-lyric-panel button[title^="钉住"]')
+      expect(pinBtn).toBeNull()
+      // 单击歌词 → 打开面板
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 点击外部 → 面板保持打开（一直显示）
+      act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      // 再单击歌词 → 关闭（toggle）
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+      // 重新打开 → 只有手动点关闭按钮才关闭
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      const closeBtn = container.querySelector('.dsh-music-lyric-panel button[title="关闭"]')
+      expect(closeBtn).toBeTruthy()
+      act(() => { closeBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('restores the lyric panel position from the Host prefs after a refresh', async () => {
+    // 回归：歌词面板位置曾漏出 Host 白名单，刷新后 GET /prefs 快照无此键 →
+    // 面板回到默认位置。预置位置后重开面板应恢复持久化的 left/top/width/height。
+    const audios = []
+    class PosAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }],
+    }
+    prefsServer = { 'dsh-music-lyric-panel-pos': JSON.stringify({ x: 123, y: 87, w: 430, h: 470 }) }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', PosAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      // 预置位置已恢复：内联 geometry 为持久化值（而非默认居中）
+      expect(lyricPanelEl.style.left).toBe('123px')
+      expect(lyricPanelEl.style.top).toBe('87px')
+      expect(lyricPanelEl.style.width).toBe('430px')
+      expect(lyricPanelEl.style.height).toBe('470px')
+      expect(lyricPanelEl.style.transform).toBe('none')
+    } finally { lyricFixture = null }
+  })
+
+  it('updates the pinned lyric panel from AI 讲书 subtitles to QQ lyrics on source switch', async () => {
+    // Regression: 歌词面板一直钉住时，从 AI 讲书切到 QQ 音乐播放，面板必须刷新为
+    // QQ 歌词，而不是残留小说字幕。startQQPlayback 直接调 loadQQLyric（不经
+    // loadLyricForTrack），若 loadQQLyric 不先 resetLyric，残留的 subtitleLines 会
+    // 让 syncLyricPanelData 继续以字幕生成歌词行。
+    const audios = []
+    class SwitchAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '切换测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '第一章的旁白内容。第二句旁白。'
+    qqLoggedIn = true
+    qqLyricFixture = {
+      ok: true, hasLyric: true,
+      lrc: [{ t: 0, text: '告白气球' }, { t: 3, text: '亲爱的 爱上你' }],
+      trans: [],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', SwitchAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // ---- 1) AI 讲书播放：填充字幕 ----
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('切换测试'))
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      audio.currentTime = 0
+      act(() => { audio.emit('timeupdate') })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      // 单击字幕打开歌词面板 → 显示小说字幕
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(barLyric).toBeTruthy()
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      const bookLines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')].map((el) => el.textContent)
+      expect(bookLines.join('')).toContain('第一章的旁白内容')
+      // ---- 2) 切到 QQ 音乐播放：startQQPlayback（绕过 loadLyricForTrack）----
+      const onlineTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'QQ音乐')
+      act(() => { onlineTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const recTab = await waitForText(container, '.dsh-music-qq-viewtab', '推荐歌单')
+      act(() => { recTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-playlist-card')].find((b) => b.textContent.includes('热门推荐'))
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const song = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('告白气球'))
+      act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 歌词面板应刷新为 QQ 歌词，不再显示小说字幕
+      const qqLines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')].map((el) => el.textContent)
+      expect(qqLines.join('')).toContain('告白气球')
+      expect(qqLines.join('')).toContain('亲爱的 爱上你')
+      expect(qqLines.join('')).not.toContain('第一章的旁白内容')
+      // 面板仍保持打开（钉住/未钉住都不应因切歌而关闭）
+      expect(lyricPanelEl.style.display).not.toBe('none')
+    } finally {
+      bookTextFixture = ''
+      bookMetaSections = []
+      qqLyricFixture = null
+    }
   })
 
   // 歌词换行动效装置：boot 后播放单曲目 a.mp3，返回可 emit timeupdate 的主 audio。
@@ -4645,6 +5303,8 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { song.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const barEl = container.querySelector('.dsh-music-bar')
+      const controls = container.querySelector('.dsh-music-bar-controls')
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
       expect(barEl.classList.contains('dimmed')).toBe(true)
       // 闲置态 → 歌词显示当前行（currentTime=0 → 第一行，无翻译）
       const lyric = container.querySelector('.dsh-music-bar-lyric')
@@ -4655,8 +5315,8 @@ describe('dsh-music-player client render smoke', () => {
       const lyric2 = container.querySelector('.dsh-music-bar-lyric')
       expect(lyric2.textContent).toContain('亲爱的 爱上你')
       expect(lyric2.textContent).toContain('darling I love you')
-      // 使用态（悬停）→ 歌词收起（与本地歌词同规格）
-      act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+      // 使用态（悬停右端热区）→ 歌词收起（与本地歌词同规格）
+      act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
       expect(container.querySelector('.dsh-music-bar-lyric')).toBeNull()
     } finally { qqLyricFixture = null }
   })
@@ -5078,9 +5738,9 @@ describe('dsh-music-player client render smoke', () => {
     const nameSpan = container.querySelector('.dsh-music-bar-name')
     expect(nameSpan).toBeTruthy()
     expect(nameSpan.textContent).toContain('告白气球')
-    // 播放条处于闲置（半透明）态时不显示时长；mouseover 激活后显示恢复的位置。
-    const barEl = container.querySelector('.dsh-music-bar')
-    act(() => { barEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    // 播放条处于闲置（半透明）态时不显示时长；鼠标移入右端热区激活后显示恢复的位置。
+    const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+    act(() => { hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
     const timeSpan = container.querySelector('.dsh-music-bar-time')
     expect(timeSpan).toBeTruthy()
     expect(timeSpan.textContent).toBe('1:00 / 4:00')
@@ -7207,15 +7867,16 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // five toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，默认全开；
-    // 跑马灯/边缘渐隐是内置行为，不再提供开关。
+    // six toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示 / 歌词面板透明)，
+    // 默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    expect(toggles.length).toBe(5)
+    expect(toggles.length).toBe(6)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
     expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
     expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开）
 
     // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -7245,6 +7906,8 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // turn OFF the bar-bg toggle
     act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the lyric-panel ghost toggle
+    act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
     expect(lyricPost).toBeTruthy()
@@ -7262,6 +7925,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(barBgPost).toBeTruthy()
     expect(barBgPost.prefs['dsh-music-show-bar-bg']).toBe('0')
     expect(prefsServer['dsh-music-show-bar-bg']).toBe('0')
+    const ghostPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-panel-ghost'])
+    expect(ghostPost).toBeTruthy()
+    expect(ghostPost.prefs['dsh-music-lyric-panel-ghost']).toBe('0')
+    expect(prefsServer['dsh-music-lyric-panel-ghost']).toBe('0')
 
     // 歌词显示关闭 → 动效配置行联动隐藏（频谱样式选择器仍在，showViz 为开）；重新打开后恢复，
     // 且保留刚才选的 karaoke。
@@ -7273,7 +7940,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
-    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0', 'dsh-music-show-bar-bg': '0' }
+    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0', 'dsh-music-show-bar-bg': '0', 'dsh-music-lyric-panel-ghost': '0' }
     vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     await bootClient()
     const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -7292,6 +7959,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // quality restored OFF
     expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // progress restored OFF
     expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
+    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
