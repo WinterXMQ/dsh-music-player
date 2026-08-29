@@ -838,9 +838,9 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
-  it('opens the panel on double-clicking the bar name (track) or the idle title', async () => {
-    // 双击播放条左侧名称（有曲目时的 .dsh-music-bar-name，或停止状态时的
-    // .dsh-music-bar-idle「DSH音乐播放器」）→ 打开面板弹窗（再双击关闭，toggle）。
+  it('opens the panel on clicking the bar name (track) or double-clicking the idle title', async () => {
+    // 单击播放条左侧名称（有曲目时的 .dsh-music-bar-name）→ 打开面板弹窗（再单击关闭，
+    // toggle）；停止状态时的 .dsh-music-bar-idle「DSH音乐播放器」保持双击打开（未改）。
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -868,20 +868,20 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const nameEl = container.querySelector('.dsh-music-bar-name-text')
     expect(nameEl).toBeTruthy()
-    // 播放后面板仍打开 → 双击歌名文本 → 关闭（toggle）
-    act(() => { nameEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 播放后面板仍打开 → 单击歌名文本 → 关闭（toggle）
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).toBe('none')
-    // 再双击歌名 → 重新打开
-    act(() => { nameEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 再单击歌名 → 重新打开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).not.toBe('none')
   })
 
-  it('double-clicking the quality badge does NOT open the panel (track name/artist do)', async () => {
-    // Regression: onDoubleClick 挂在名称容器（.dsh-music-bar-name）上，歌名/歌手/章节
-    // 等附属信息双击都打开面板；唯独音质徽章（.dsh-music-bar-src）不触发——它是纯
-    // 信息展示，双击不应打开面板（由 togglePanelOnName 内的 closest 排除）。
+  it('clicking the quality badge does NOT open the panel (track name/artist do)', async () => {
+    // Regression: 单击事件挂在名称容器（.dsh-music-bar-name）上，歌名/歌手/章节
+    // 等附属信息单击都打开面板；唯独音质徽章（.dsh-music-bar-src）不触发——它是纯
+    // 信息展示，单击不应打开面板（由 togglePanelOnName 内的 closest 排除）。
     manifest = { ...baseManifest(), tracks: [{ id: '0', name: 'a.flac', url: '/dsh-music/0', size: 10, ext: 'flac', path: '/music/a.flac', quality: 'FLAC · 无损', artists: ['周杰伦'] }] }
     vi.resetModules()
     lastFilesUrl = null
@@ -908,19 +908,50 @@ describe('dsh-music-player client render smoke', () => {
     const badge = container.querySelector('.dsh-music-bar-src')
     expect(badge).toBeTruthy()
     expect(badge.textContent).toContain('FLAC · 无损')
-    // 双击音质徽章 → 面板仍关闭（不触发）
-    act(() => { badge.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 单击音质徽章 → 面板仍关闭（不触发）
+    act(() => { badge.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).toBe('none')
-    // 双击歌手名（.dsh-music-bar-artist）→ 面板打开（附属信息也可触发，仅徽章除外）
+    // 单击歌手名（.dsh-music-bar-artist）→ 面板打开（附属信息也可触发，仅徽章除外）
     const artistEl = container.querySelector('.dsh-music-bar-artist')
     expect(artistEl).toBeTruthy()
     expect(artistEl.textContent).toContain('周杰伦')
-    act(() => { artistEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    act(() => { artistEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).not.toBe('none')
-    // 再双击歌手名 → 关闭（toggle）
-    act(() => { artistEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    // 再单击歌手名 → 关闭（toggle）
+    act(() => { artistEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).toBe('none')
+  })
+
+  it('keeps the name-click toggle working when the real mousedown→click order fires', async () => {
+    // 回归：播放面板有全局 mousedown「点外部关闭」处理器。真实浏览器里 mousedown
+    // 恒先于 click：面板打开时单击歌名，mousedown 先把面板关掉，随后的 click toggle
+    // 又把它重新打开 → 表现为「再单击还是打开」。名称区已加入豁免名单（与右侧
+    // 按钮组同理），本用例按真实顺序派发 mousedown + click，断言 toggle 正常关闭。
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // 打开面板 → 播放 a.mp3（歌名区出现，面板保持打开）
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const panelEl = container.querySelector('.dsh-music-panel')
+    expect(panelEl.style.display).not.toBe('none')
+    const nameEl = container.querySelector('.dsh-music-bar-name')
+    expect(nameEl).toBeTruthy()
+    // mousedown（点外部关闭的入口事件）→ 名称区豁免：面板保持打开
+    act(() => { nameEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(panelEl.style.display).not.toBe('none')
+    // 随后的 click → toggle 正常关闭（不再被「mousedown 先关 + click 重开」抵消）
+    act(() => { nameEl.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     expect(panelEl.style.display).toBe('none')
   })
@@ -3023,9 +3054,9 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricFixture = null }
   })
 
-  it('double-clicking the bar lyric opens a full-lyric panel that highlights the current line', async () => {
-    // 双击播放条歌词/字幕 → 打开歌词面板：显示完整歌词，当前行高亮并随播放推进
-    // 更新；再双击可关闭。面板默认居中、独立于播放面板。
+  it('clicking the bar lyric opens a full-lyric panel that highlights the current line', async () => {
+    // 单击播放条歌词/字幕 → 打开歌词面板：显示完整歌词，当前行高亮并随播放推进
+    // 更新；再单击可关闭。面板默认居中、独立于播放面板。
     const audios = []
     class LpAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -3074,10 +3105,12 @@ describe('dsh-music-player client render smoke', () => {
       const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
       expect(lyricPanelEl).toBeTruthy()
       expect(lyricPanelEl.style.display).toBe('none')
-      // 双击播放条歌词 → 打开面板
+      // 透明模式默认开启 → 面板根节点带 ghost 类（CSS 隐去外壳背景/边框/阴影）
+      expect(lyricPanelEl.classList.contains('ghost')).toBe(true)
+      // 单击播放条歌词 → 打开面板
       const barLyric = container.querySelector('.dsh-music-bar-lyric')
       expect(barLyric).toBeTruthy()
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).not.toBe('none')
       // 面板显示完整两行歌词，第一行（当前）高亮
@@ -3094,16 +3127,74 @@ describe('dsh-music-player client render smoke', () => {
       const lines2 = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')]
       expect(lines2[0].classList.contains('active')).toBe(false)
       expect(lines2[1].classList.contains('active')).toBe(true)
-      // 再双击播放条歌词 → 关闭
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      // 再单击播放条歌词 → 关闭
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).toBe('none')
     } finally { lyricFixture = null }
   })
 
+  it('drops the ghost class when the lyric-panel transparency pref is off (restore solid shell)', async () => {
+    // 透明模式回归：dsh-music-lyric-panel-ghost='0' 时面板根节点不带 ghost 类，
+    // 恢复普通外壳（背景/边框/阴影由 CSS 提供，这里只验证类的开关随偏好联动）。
+    const audios = []
+    class GhostOffAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, name: 'a.lrc',
+      lrc: [{ t: 0, text: '第一句歌词' }, { t: 5, text: '第二句歌词' }],
+    }
+    try {
+      vi.resetModules(); registered = []; lastFilesUrl = null
+      manifest = baseManifest()
+      prefsServer = { 'dsh-music-lyric-panel-ghost': '0' }
+      window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+      vi.stubGlobal('Audio', GhostOffAudio)
+      vi.stubGlobal('fetch', fetchStub)
+      vi.stubGlobal('requestAnimationFrame', () => 0)
+      vi.stubGlobal('cancelAnimationFrame', () => {})
+      vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+      vi.stubGlobal('setInterval', () => 0)
+      vi.stubGlobal('clearInterval', () => {})
+      window.confirm = () => true
+      window.prompt = () => null
+      await import('../lib/client.js')
+      const modExports = factory((name) => (name === 'react' ? React : undefined))
+      const slots = {
+        inject: (name, cb) => { cb() },
+        register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+      }
+      modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+      await new Promise((r) => setTimeout(r, 0))
+      const audio = audios[0]
+      expect(audio).toBeTruthy()
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const lyricPanel = registered.find((r) => r.id === 'music-player-lyric-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel, lyricPanel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+      act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const barLyric = container.querySelector('.dsh-music-bar-lyric')
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
+      expect(lyricPanelEl.style.display).not.toBe('none')
+      expect(lyricPanelEl.classList.contains('ghost')).toBe(false)
+      // 空闲时 audio 未被使用也无妨——本用例只关心类名联动。
+      void audio
+    } finally { lyricFixture = null }
+  })
+
   it('keeps the lyric panel always open on outside clicks (only the close button dismisses it)', async () => {
     // 歌词面板「常驻显示」：不再有钉住按钮，点击外部不关闭面板（一直显示），
-    // 只有手动点关闭按钮才消失。双击歌词可开关面板。
+    // 只有手动点关闭按钮才消失。单击歌词可开关面板。
     const audios = []
     class PinAudio extends FakeAudio {
       constructor() { super(); audios.push(this) }
@@ -3150,20 +3241,20 @@ describe('dsh-music-player client render smoke', () => {
       // 已移除钉住按钮
       const pinBtn = container.querySelector('.dsh-music-lyric-panel button[title^="钉住"]')
       expect(pinBtn).toBeNull()
-      // 双击歌词 → 打开面板
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      // 单击歌词 → 打开面板
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).not.toBe('none')
       // 点击外部 → 面板保持打开（一直显示）
       act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).not.toBe('none')
-      // 再双击歌词 → 关闭（toggle）
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      // 再单击歌词 → 关闭（toggle）
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).toBe('none')
       // 重新打开 → 只有手动点关闭按钮才关闭
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).not.toBe('none')
       const closeBtn = container.querySelector('.dsh-music-lyric-panel button[title="关闭"]')
@@ -3291,10 +3382,10 @@ describe('dsh-music-player client render smoke', () => {
       act(() => { audio.emit('timeupdate') })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       const lyricPanelEl = container.querySelector('.dsh-music-lyric-panel')
-      // 双击字幕打开歌词面板 → 显示小说字幕
+      // 单击字幕打开歌词面板 → 显示小说字幕
       const barLyric = container.querySelector('.dsh-music-bar-lyric')
       expect(barLyric).toBeTruthy()
-      act(() => { barLyric.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+      act(() => { barLyric.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
       expect(lyricPanelEl.style.display).not.toBe('none')
       const bookLines = [...lyricPanelEl.querySelectorAll('.dsh-music-lyric-line')].map((el) => el.textContent)
@@ -7776,15 +7867,16 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // five toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，默认全开；
-    // 跑马灯/边缘渐隐是内置行为，不再提供开关。
+    // six toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示 / 歌词面板透明)，
+    // 默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    expect(toggles.length).toBe(5)
+    expect(toggles.length).toBe(6)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
     expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
     expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开）
 
     // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -7814,6 +7906,8 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // turn OFF the bar-bg toggle
     act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the lyric-panel ghost toggle
+    act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
     expect(lyricPost).toBeTruthy()
@@ -7831,6 +7925,10 @@ describe('dsh-music-player client render smoke', () => {
     expect(barBgPost).toBeTruthy()
     expect(barBgPost.prefs['dsh-music-show-bar-bg']).toBe('0')
     expect(prefsServer['dsh-music-show-bar-bg']).toBe('0')
+    const ghostPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-lyric-panel-ghost'])
+    expect(ghostPost).toBeTruthy()
+    expect(ghostPost.prefs['dsh-music-lyric-panel-ghost']).toBe('0')
+    expect(prefsServer['dsh-music-lyric-panel-ghost']).toBe('0')
 
     // 歌词显示关闭 → 动效配置行联动隐藏（频谱样式选择器仍在，showViz 为开）；重新打开后恢复，
     // 且保留刚才选的 karaoke。
@@ -7842,7 +7940,7 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) }) // OFF again
 
     // restart: the saved OFF value must be restored (not defaulted back to on)
-    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0', 'dsh-music-show-bar-bg': '0' }
+    prefsServer = { ...prefsServer, 'dsh-music-show-lyric': '0', 'dsh-music-show-viz': '1', 'dsh-music-show-progress': '0', 'dsh-music-show-quality': '0', 'dsh-music-show-bar-bg': '0', 'dsh-music-lyric-panel-ghost': '0' }
     vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
     await bootClient()
     const panel2 = registered.find((r) => r.id === 'music-player-panel').elementFactory()
@@ -7861,6 +7959,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // quality restored OFF
     expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // progress restored OFF
     expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
+    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]

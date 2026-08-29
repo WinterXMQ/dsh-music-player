@@ -505,6 +505,28 @@ describe('dsh-music-player host routes', () => {
     } finally { cleanup() }
   })
 
+  it('accepts the lyric-panel ghost pref through the allowlist (persistence regression)', async () => {
+    // 回归：歌词面板透明模式开关必须能经 POST 存入 Host、GET 回读，否则表现为
+    // 「刷新后透明开关重置回默认开」。与 lyric-panel-pos 白名单回归同规格。
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(
+        makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: {
+          'dsh-music-lyric-panel-ghost': '0',
+        } }) }),
+        res,
+      )
+      const d = JSON.parse(res.body)
+      expect(d.ok).toBe(true)
+      expect(d.prefs['dsh-music-lyric-panel-ghost']).toBe('0')
+      const g = makeRes()
+      await handler(makeReq({ method: 'GET', url: '/dsh-music/prefs' }), g)
+      const gd = JSON.parse(g.body)
+      expect(gd.prefs['dsh-music-lyric-panel-ghost']).toBe('0')
+    } finally { cleanup() }
+  })
+
   it('lists .txt novels as books in the manifest', async () => {
     // Books share the default root with music until a separate book root is set.
     const { handler, musicDir, cleanup } = boot({
