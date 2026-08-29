@@ -585,9 +585,59 @@ describe('dsh-music-player client render smoke', () => {
     const map = JSON.parse(prefsServer['dsh-music-books-playback'] || '{}')
     expect(map['凡人修仙传.txt']).toBeTruthy()
     expect(map['凡人修仙传.txt'].pos).toBe(42)
-    expect(map['凡人修仙传.txt'].ts).toBe(111)
+    // 恢复阶段会把 ts 保鲜到当前时间（restoreBookPlayback 与 QQ 恢复同理：
+    // 「更新时间戳，避免被当作旧数据」），但迁移本身不得丢失/破坏条目。
+    expect(map['凡人修仙传.txt'].ts).toBeGreaterThan(111)
     // the legacy single-book key is gone from the browser store
     expect(localStorage.getItem('dsh-music-book-playback')).toBeNull()
+  })
+
+  it('restores the book (not newer-saved music) when the last activity was a book, and marks scope book', async () => {
+    // Regression（刷新后讲书被切到音乐）: 讲书从不写 scope='book'（恢复快捷分支是
+    // 死代码），而本地音乐的 restorePlayback 每次刷新都会把自己的 ts 重写为当前时间
+    // → 讲书在 scope/时间戳两个信号上都系统性输给音乐。现在讲书恢复/播放会写
+    // scope='book'（快捷分支生效）并保鲜自己的 ts：即使音乐记录的 ts 更新，刷新后
+    // 也必须恢复讲书而不是音乐。
+    const bm = baseManifest()
+    manifest = { ...bm, ttsConfigured: true, books: [{ id: 'b1', name: '续播范畴测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '续播范畴测试文本。'
+    prefsServer = {
+      'dsh-music-scope': JSON.stringify({ kind: 'book' }),
+      // 音乐记录 ts 比讲书「新」：旧逻辑会据此恢复音乐
+      'dsh-music-playback': JSON.stringify({ id: bm.tracks[0].id, name: bm.tracks[0].name, position: 1, duration: 9, ts: 9999999999999 }),
+      'dsh-music-books-playback': JSON.stringify({
+        '续播范畴测试.txt': { from: 1, base: 5, pos: 2, total: 25, ts: 8888888888 },
+      }),
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true; window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (n, cb) => cb(), register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar)) })
+    // 恢复的是讲书（不是 ts 更新的音乐）
+    expect(container.querySelector('.dsh-music-bar').textContent).toContain('续播范畴测试')
+    // 讲书恢复把范畴信号落盘为 'book'（下次刷新快捷分支直接命中）。pref 走 Host
+    // 防抖 flush（localStorage 只读不写），等 flush 周期后断言 Host 侧的值。
+    await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
+    expect(JSON.parse(prefsServer['dsh-music-scope'] || 'null')).toEqual({ kind: 'book' })
+    bookTextFixture = ''
   })
 
   it('stays in the work state (no dim / controls expanded) when there is no playback content', async () => {
