@@ -974,6 +974,60 @@ describe('dsh-music-player parseBookStructure', () => {
     expect(st.sections[1].heading).toContain('第一章')
   })
 
+  it('recognizes 6-char-numeral chapter numbers (第一千一百零一…)', () => {
+    // {1,5} numerals capped the parser at 五-digit chapter numbers, silently
+    // dropping every chapter from 第一千一百零一 on (6+ numeral chars) — ~800
+    // missing TOC entries in a 2400-chapter book. 两 as a digit is covered too.
+    const chapters = ['第一千一百零一章 洞下激战', '第一千九百九十九章 终局', '第两千零一章 天戈灭敌']
+    for (const heading of chapters) {
+      const text = [heading, '这一章的正文内容足够长，用来验证标题可以被正确识别。'].join('\n')
+      const st = parseBookStructure(text.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, ''), 'novel.txt')
+      expect(st.sections.length).toBe(1)
+      expect(st.sections[0].type).toBe('chapter')
+      expect(st.sections[0].heading.replace(/\s+/g, '')).toBe(heading.replace(/\s+/g, ''))
+    }
+  })
+
+  it('recognizes volume-prefixed chapter headings (卷名 第X章 标题)', () => {
+    // Multi-volume compendiums repeat the volume name in every heading:
+    // `精绝古城 第五章 火瓢虫`. These exceed the named length cap and must be
+    // classified as chapters with the full line (volume + chapter) kept, so the
+    // TOC still tells the volumes apart.
+    const text = [
+      '精绝古城 第五章 火瓢虫',
+      '这一章的正文内容足够长，用来验证标题可以被正确识别。',
+      '',
+      '精绝古城 第六章 九层妖楼',
+      '这一章的正文内容也足够长，同样用来验证分块的对齐。',
+    ].join('\n')
+    const st = parseBookStructure(text.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, ''), 'novel.txt')
+    expect(st.sections.length).toBe(2)
+    expect(st.sections.every((s) => s.type === 'chapter')).toBe(true)
+    expect(st.sections.map((s) => s.heading)).toEqual(['精绝古城 第五章 火瓢虫', '精绝古城 第六章 九层妖楼'])
+  })
+
+  it('never crowns ornament separator lines (———— / ······) section headings', () => {
+    // Dash/bullet rows are visual separators; treating them as headings reads
+    // the dashes aloud and lets one of them swallow the whole tail of a book.
+    const text = [
+      '第一章 开端',
+      '这一章的正文内容足够长，用来验证标题可以被正确识别。',
+      '',
+      '————————————',
+      '······',
+      '',
+      '第二章 承接',
+      '这一章的正文内容也足够长，用来验证分隔线不会截断正文。',
+    ].join('\n')
+    const st = parseBookStructure(text.replace(/\r\n?/g, '\n').replace(/\uFEFF/g, ''), 'novel.txt')
+    for (const s of st.sections) {
+      expect(s.heading).not.toContain('—')
+      expect(s.heading).not.toContain('····')
+    }
+    const chapters = st.sections.filter((s) => s.type === 'chapter')
+    expect(chapters.length).toBe(2)
+  })
+
   it('recognizes standalone short-line (named) section headings like 麻将牌', () => {
     const text = [
       '县级夫人 作者：杨晓升',
@@ -991,6 +1045,27 @@ describe('dsh-music-player parseBookStructure', () => {
     expect(st.sections.map((s) => s.type)).toEqual(['named', 'named', 'epilogue'])
     expect(st.sections[0].heading).toBe('麻将牌')
     expect(st.sections[1].heading).toBe('青远县')
+  })
+
+  it('never crowns a standalone quoted dialogue line a named section heading', () => {
+    // In blank-line-separated txt layouts a short dialogue line like
+    // `“有害吗？”大奎马上问` sits alone between blanks exactly like a named
+    // sub-title would — but it is body text, and treating it as a heading once
+    // swallowed the entire rest of the book into a fake section.
+    const text = [
+      '七星鲁王宫完整版',
+      '50年前，长沙镖子岭。4个土夫子正蹲在一个土丘上，所有人都不说话。',
+      '',
+      '“有害吗？”大奎马上问',
+      '',
+      '三叔摇了摇头，把烟头按灭在地上，接着讲起了当年发生在这片芦苇荡里的故事，语气十分沉重。',
+    ].join('\n')
+    const st = parseBookStructure(text, '七星鲁王宫完整版.txt')
+    for (const s of st.sections) {
+      expect(s.heading).not.toContain('有害吗')
+    }
+    // the book-title line may remain a named section; the dialogue must not
+    expect(st.sections.some((s) => s.heading.includes('有害吗'))).toBe(false)
   })
 
   it('rejects a run of short lyric lines as headings', () => {
@@ -1176,9 +1251,36 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     const st = parseBookStructure(n, 'novel.txt')
     const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
     expect(chunks.length).toBeGreaterThan(0)
-    // the break still opens a chunk (fallback records it) and nothing crashes
-    expect(fromChunkOfBreak[0]).toBe(0)
+    // the break still opens a chunk and nothing crashes; the isolated heading
+    // chunk holds the clean title (the WPS code stays in the chunk before it)
+    expect(fromChunkOfBreak.length).toBe(1)
+    const hIdx = fromChunkOfBreak[0]
+    expect(hIdx).toBeGreaterThanOrEqual(0)
+    expect(chunks[hIdx]).toBe('第二章')
     expect(chunks.join('')).toContain('这是第二章的正文')
+  })
+
+  it('recognizes decorated chapter headings and reads the bare title', () => {
+    // Downloaded .txt files usually carry ornament + site credits before the
+    // chapter token. The parser must strip them for the TOC, and the chunker
+    // must isolate the bare `第一章 …` title while the ornament stays behind.
+    const text = [
+      '★盗墓笔记·秦岭神树篇·南派三叔·第一章 老痒出狱',
+      '这句话才短短的几个字，却把我的思绪全部都吸引了过去。',
+      '',
+      '★盗墓笔记·秦岭神树篇·南派三叔·第二章 六角铃铛',
+      '这一章的正文内容，长度足够验证正文与标题是分开的两个块。',
+    ].join('\n')
+    const n = norm(text)
+    const st = parseBookStructure(n, '秦岭神树篇.txt')
+    expect(st.sections.length).toBe(2)
+    expect(st.sections.map((s) => s.type)).toEqual(['chapter', 'chapter'])
+    expect(st.sections.map((s) => s.heading)).toEqual(['第一章 老痒出狱', '第二章 六角铃铛'])
+    const { chunks, fromChunkOfBreak } = splitBookChunks(n, breaksOf(st))
+    const strip = (s) => s.replace(/\s+/g, '')
+    expect(strip(chunks.join(''))).toBe(strip(n)) // 装饰前缀不丢字
+    const hIdx = fromChunkOfBreak[0]
+    expect(chunks[hIdx]).toBe('第一章 老痒出狱') // 标题独块且是干净标题
   })
 
   it('handles an empty / no-section book without crashing', () => {
@@ -1238,6 +1340,66 @@ describe('dsh-music-player splitBookChunks (heading gets its own chunk)', () => 
     expect(holder).toContain('他说完就走了。”')
     // each chunk stays within the cap
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+  })
+
+  // Regression: body prose must not fragment into runs of consecutive short
+  // chunks. Two guards: ，、 now break segments (a comma-heavy description is
+  // packed into ~150-char blocks instead of one giant segment hitting
+  // splitOversize), and splitOversize takes any tail that fits in a single
+  // chunk whole (no re-subdividing the shrinking tail at clause pauses).
+  it('keeps a comma-heavy long description as clean ~150 blocks (no consecutive short chunks)', () => {
+    const desc = '极长的描述句'.repeat(23) + '，然后没有句号地继续往下写，直到这里才终于告一段落。'
+    const n = norm(['开头几个短句。', desc, '结尾两个短句。', '最后一句。'].join('\n'))
+    const { chunks } = splitBookChunks(n, [])
+    const strip = (s) => s.replace(/\s+/g, '')
+    expect(strip(chunks.join(''))).toBe(strip(n)) // 文本保留（仅空白折叠）
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    // 主块接近上限，而不是整段碎成多个小片
+    expect(Math.max(...chunks.map((c) => c.length))).toBeGreaterThanOrEqual(120)
+    // 不存在"连续>=2个 <40字"的碎块（正文不应出现连续少内容分块）
+    for (let i = 0; i < chunks.length; i++) {
+      if (chunks[i].length < 40) {
+        let j = i
+        while (j < chunks.length && chunks[j].length < 40) j++
+        if (j - i >= 2) throw new Error('出现连续短块: ' + chunks.slice(i, j).join('|'))
+        i = j
+      }
+    }
+  })
+
+  it('does not break a quoted dialogue at its internal ，、 (atomic quote still holds)', () => {
+    const n = norm('他说：“你来了吗？我等你，很久了。”她点点头。')
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.join('')).toBe(n) // 引号内逗号不分离对话与叙述
+    const holder = chunks.find((c) => c.includes('“'))
+    expect(holder).toBeTruthy()
+    expect(holder).toContain('你来了吗？我等你，很久了。”')
+  })
+
+  it('takes the tail of an over-long unpunctuated sentence as one chunk', () => {
+    const n = norm('无标点'.repeat(60)) // 180 chars, no break punctuation
+    const { chunks } = splitBookChunks(n, [])
+    expect(chunks.join('')).toBe(n)
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    expect(Math.max(...chunks.map((c) => c.length))).toBeGreaterThanOrEqual(150)
+    // tail is a single block (150, 30) rather than several tiny pieces
+    expect(chunks.length).toBe(2)
+  })
+
+  it('never chips a tiny 他说： lead-in chunk off a long quoted monologue', () => {
+    // For `他说：“…long quote…”` the last outside-quote clause break of the first
+    // window is the lead-in colon itself (everything after it is inQuote), so the
+    // old splitter cut a 3-char `他说：` orphan chunk out from between two full
+    // ones. The lead-in must stay glued to the quote it introduces.
+    const quote = '今天的情况大家都看到了，形势比人强，我们必须立刻做出判断，不能再犹豫下去了，任何拖延都会付出代价，这是摆在我们面前最现实的难题，也是必须要跨过去的一道坎。'
+    const n = norm(['前情交代一句。', '他说：“' + quote.repeat(2) + '”', '后续叙述。'].join('\n'))
+    const { chunks } = splitBookChunks(n, [])
+    const strip = (s) => s.replace(/\s+/g, '')
+    expect(strip(chunks.join(''))).toBe(strip(n)) // 文本保留
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(MAX_TTS_CHARS)
+    const holder = chunks.find((c) => c.includes('他说：'))
+    expect(holder).toBeTruthy()
+    expect(holder).toContain('他说：“') // 引出语与对话同块，不单独成 3 字孤儿块
   })
 })
 
@@ -2451,6 +2613,87 @@ describe('dsh-music-player playlists', () => {
       const out = await tool.execute({ playlist: '不存在的歌单' })
       expect(out.played).toBe(false)
       expect(out.notice).toContain('没有找到歌单')
+    } finally { cleanup() }
+  })
+})
+
+describe("dsh-music-player What's New (版本更新弹窗)", () => {
+  it('manifest 下发四件套：首装为 fresh，写过已看标记后为 seen', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      // 四件套：当前版条目 / 历史列表 / 欢迎内容 / 判定结论
+      expect(Array.isArray(data.whatsNewHistory)).toBe(true)
+      expect(data.whatsNewHistory.length).toBeGreaterThan(0)
+      expect(data.whatsNewWelcome && Array.isArray(data.whatsNewWelcome.sections)).toBe(true)
+      expect(['fresh', 'upgrade', 'seen', 'downgrade']).toContain(data.whatsNewState)
+      // 条目允许缺省（本版没写就不下发），但存在时必须对应当前版本号
+      if (data.whatsNew !== null) {
+        expect(data.whatsNew.version).toBe(data.version)
+      }
+      // 首装（无任何 prefs 记录）→ fresh
+      expect(data.whatsNewState).toBe('fresh')
+
+      // 客户端关闭弹窗后 POST 的已看标记：写入并持久化，判定翻转为 seen
+      const res2 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/prefs',
+        body: JSON.stringify({ prefs: { 'dsh-music-seen-version': data.version } }),
+      }), res2)
+      expect(JSON.parse(res2.body).ok).toBe(true)
+      const res3 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res3)
+      expect(JSON.parse(res3.body).whatsNewState).toBe('seen')
+      // 注：loadPrefs 每次都重读 prefs 文件，所以上一步的 seen 判定本身已证明
+      // 标记落盘——新进程重读同样能拿到。
+    } finally { cleanup() }
+  })
+
+  it('老用户启发式：无已看记录但 prefs 已有其他键 → upgrade', async () => {
+    const { handler, cleanup } = boot({
+      files: { '.dsh/music-player-prefs.json': JSON.stringify({ version: 2, prefs: { 'dsh-music-volume': '0.5' } }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(JSON.parse(res.body).whatsNewState).toBe('upgrade')
+    } finally { cleanup() }
+  })
+
+  it('降级安装判定为 downgrade；seen-version 脏值被 sanitize 丢弃', async () => {
+    const { handler, cleanup } = boot({
+      files: { '.dsh/music-player-prefs.json': JSON.stringify({ version: 2, prefs: { 'dsh-music-seen-version': '99.0.0' } }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(JSON.parse(res.body).whatsNewState).toBe('downgrade')
+
+      // POST 非版本号形态的脏值 → 被 sanitizePrefs 丢弃，原值保持不变
+      const res2 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/prefs',
+        body: JSON.stringify({ prefs: { 'dsh-music-seen-version': 'not a version!' } }),
+      }), res2)
+      const res3 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/prefs' }), res3)
+      expect(JSON.parse(res3.body).prefs['dsh-music-seen-version']).toBe('99.0.0')
+    } finally { cleanup() }
+  })
+
+  it('rescan 路由同样下发 What\'s New 四件套', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'AUDIO' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/rescan' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(Array.isArray(data.whatsNewHistory)).toBe(true)
+      expect(['fresh', 'upgrade', 'seen', 'downgrade']).toContain(data.whatsNewState)
+      expect(data.whatsNewWelcome && Array.isArray(data.whatsNewWelcome.sections)).toBe(true)
     } finally { cleanup() }
   })
 })

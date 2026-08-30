@@ -100,9 +100,79 @@ let qqLyricFixture = null
 let prefsServer = {}
 let prefsPosts = []
 let prefsPostOpts = []
+// ---- 每日新闻播报 fixtures（NewsPane 冒烟测试用）----
+const newsEditionsFixture = [
+  {
+    id: 'news-20260530-0800-abcd', originShiftId: 's1', title: '早间新闻播报',
+    date: '2026-05-30', createdAt: Date.now(), played: false,
+    categories: [
+      { name: '热点', count: 2 }, { name: '国内', count: 3 }, { name: 'AI', count: 2 },
+    ],
+    totalItems: 7, totalChars: 1800,
+  },
+  {
+    id: 'news-20260529-1800-efgh', originShiftId: 'manual', title: '晚间新闻播报',
+    date: '2026-05-29', createdAt: Date.now() - 86400000, played: true,
+    categories: [{ name: '热点', count: 4 }],
+    totalItems: 4, totalChars: 900,
+  },
+]
+const newsMetaFixture = {
+  ok: true, id: 'news-20260530-0800-abcd', title: '早间新闻播报', date: '2026-05-30',
+  createdAt: newsEditionsFixture[0].createdAt, total: 4,
+  sections: [
+    { type: 'category', heading: '热点', fromChunk: 0, itemCount: 2 },
+    { type: 'category', heading: '国内', fromChunk: 2, itemCount: 3 },
+    { type: 'category', heading: 'AI', fromChunk: 3, itemCount: 2 },
+  ],
+  categories: [
+    { name: '热点', items: [
+      { title: '政策发布会召开', summary: '国新办今早介绍相关政策要点。', source: '新华社', url: '', publishedAt: '08:02' },
+      { title: '多地强降雨', summary: '暴雨预警继续。', source: '央视新闻', url: '', publishedAt: '' },
+    ] },
+    { name: '国内', items: [
+      { title: '国内条目一', summary: '摘要一。', source: '人民日报', url: '', publishedAt: '' },
+      { title: '国内条目二', summary: '摘要二。', source: '新华社', url: '', publishedAt: '' },
+      { title: '国内条目三', summary: '摘要三。', source: '澎湃', url: '', publishedAt: '' },
+    ] },
+    { name: 'AI', items: [
+      { title: 'AI 条目一', summary: '推理成本下降。', source: '机器之心', url: '', publishedAt: '' },
+      { title: 'AI 条目二', summary: '新模型发布。', source: '量子位', url: '', publishedAt: '' },
+    ] },
+  ],
+  charOffsets: [0, 120, 260, 380, 500], totalChars: 500,
+  itemChunk: [0, 0, 1, 2, 2, 3, 3], categoryChunk: [0, 2, 3],
+}
+const newsScheduleDefault = {
+  enabled: true, defaultScope: { categories: ['热点', '国内', '国际', '科技', '财经', '体育'], topics: [] },
+  shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
+}
+let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
+  // ---- 每日新闻播报：期次列表 / 运行态 / 定时偏好 / 期次 meta ----
+  if (u === '/dsh-music/news') {
+    return jsonRes({ ok: true, editions: newsEditionsFixture })
+  }
+  if (u === '/dsh-music/news/runstate') {
+    return jsonRes({ ok: true, run: null })
+  }
+  if (u === '/dsh-music/news/schedule') {
+    if (o && o.method === 'POST') {
+      const body = JSON.parse(o.body || '{}')
+      newsScheduleServer = body
+      return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, changed: true })
+    }
+    return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, failures: [] })
+  }
+  if (u.startsWith('/dsh-music/news/') && u.endsWith('/meta')) {
+    return jsonRes(newsMetaFixture)
+  }
+  if (u.startsWith('/dsh-music/news/') && u.includes('/text?from=')) {
+    const from = parseInt(new URL('http://x' + u).searchParams.get('from') || '0', 10) || 0
+    return jsonRes({ ok: true, from, text: bookTextFixture })
+  }
   if (u === '/dsh-music/prefs') {
     if (o && o.method === 'POST') {
       const body = JSON.parse(o.body || '{}')
@@ -299,6 +369,7 @@ beforeEach(async () => {
   qqFetchLog = []
   lyricOnlineFixture = null
   manifest = baseManifest()
+  newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
   await bootClient()
 })
 
@@ -391,6 +462,41 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const histItems = [...container.querySelectorAll('.dsh-music-qq-hist-item')]
     expect(histItems.some((b) => b.textContent === '刀郎')).toBe(true)
+  })
+
+  it('shows the current lyric line on the bar right after a paused refresh restore (no resume needed)', async () => {
+    // Regression: play a track with a .lrc -> pause (lyric shows) -> refresh. On
+    // boot the track is restored paused (audio never loaded, no timeupdate), so
+    // the lyric data was only loaded lazily on ▶ and the bar stayed blank. It
+    // must instead show the line at the restored position immediately.
+    prefsServer = {
+      'dsh-music-playback': JSON.stringify({ id: '0', name: 'a.mp3', position: 42, duration: 210, ts: 999999999 }),
+      'dsh-music-scope': JSON.stringify({ kind: 'library' }),
+    }
+    lyricFixture = {
+      ok: true, hasLrc: true, source: 'local',
+      lrc: [
+        { t: 0, text: '第一句歌词' },
+        { t: 10, text: '第二句歌词' },
+        { t: 40, text: '第三句歌词' },
+        { t: 60, text: '第四句歌词' },
+      ],
+    }
+    vi.resetModules(); registered = []; prefsPosts = []; lastFilesUrl = null
+    await bootClient()
+
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    // flush the restore-playback lyric fetch -> updateLyric (restored position 42s)
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    const lyric = container.querySelector('.dsh-music-bar-lyric')
+    expect(lyric).toBeTruthy()
+    // at the restored paused position (42s) the current line is the t=40 one
+    expect(lyric.textContent).toContain('第三句歌词')
   })
 
   it('restores prefs even when the Host prefs fetch is slow (panel mounts before snapshot)', async () => {
@@ -2282,7 +2388,8 @@ describe('dsh-music-player client render smoke', () => {
     // so the reader has finished it — the book must JUMP to the NEXT chunk (from=3),
     // not re-listen chunk 2 and never force currentTime to the clamped 20s end.
     audio.duration = 20
-    act(() => { audio.emit('durationchange') })
+    // 切块经 playBookFrom 的「等采集管线拆除落定再换 src」微任务，先 flush 再断言。
+    await act(async () => { audio.emit('durationchange'); await Promise.resolve() })
     audio.currentTime = 0.1
     act(() => { audio.emit('timeupdate') })
     expect(audio.src).toContain('from=3')        // jumped forward to chunk 3
@@ -2703,6 +2810,74 @@ describe('dsh-music-player client render smoke', () => {
         expect(subContentLen(line)).toBeLessThanOrEqual(20)
         expect(enders.has(line.trim().slice(-1))).toBe(true) // 断在标点，不裸切
       }
+    } finally {
+      bookTextFixture = ''
+    }
+  })
+
+  it('does not orphan a closing bracket （）at the start of a subtitle line (treated like a closing quote)', async () => {
+    // A closing full-width bracket must ride the current line exactly like a
+    // closing quote ”” does — never start a line on its own. This is the paired
+    // punctuation handling introduced for （）／【】.
+    const audios = []
+    class BracketAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [{ id: 'b1', name: '括号测试.txt', url: '/dsh-music/book/b1', size: 100, ext: 'txt' }] }
+    bookMetaSections = []
+    bookTextFixture = '他（拿着一本很厚的书，然后慢慢翻开第一页。）站了起来。'
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', BracketAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, elementFactory) => { registered.push({ id: meta.id, elementFactory }); return elementFactory },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    expect(audio).toBeTruthy()
+    try {
+      const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+      const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const root = createRoot(container)
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const bookRow = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('括号测试'))
+      expect(bookRow).toBeTruthy()
+      act(() => { bookRow.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      audio.duration = 10
+      const seen = new Set()
+      for (let t = 0; t <= 9.9; t += 0.05) {
+        audio.currentTime = t
+        act(() => { audio.emit('timeupdate') })
+        const el = container.querySelector('.dsh-music-bar-lyric')
+        if (el && el.textContent) seen.add(el.textContent)
+      }
+      // the fixture wraps into multiple lines (content > 20 chars)
+      expect(seen.size).toBeGreaterThan(1)
+      // the closing bracket is absorbed into the current line — never orphaning
+      // at the start of a line
+      for (const line of seen) expect(line.trim()).not.toMatch(/^[）】〉》]/)
+      // and the full content is intact (the pair survives)
+      expect([...seen].join('')).toContain('）')
     } finally {
       bookTextFixture = ''
     }
@@ -5195,9 +5370,9 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    // 第 3 个开关 = 音质徽章显示（位于频谱之后、进度条之前），当前 OFF
-    expect(toggles[2].getAttribute('aria-checked')).toBe('false')
-    act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 第 4 个开关 = 音质徽章显示（歌词显示/歌词面板透明/频谱之后、进度条之前），当前 OFF
+    expect(toggles[3].getAttribute('aria-checked')).toBe('false')
+    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // 返回播放条 → 音质芯片恢复
     const libraryTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
@@ -5234,9 +5409,9 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    // 第 5 个开关 = 播放条背景显示（位于进度条之后）
-    expect(toggles[4].getAttribute('aria-checked')).toBe('true')
-    act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 第 6 个开关 = 播放条背景显示（位于进度条之后）
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true')
+    act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // 返回播放条：bare class 加上，内容（歌名）仍保留
     const libraryTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
@@ -7867,16 +8042,16 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // six toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示 / 歌词面板透明)，
+    // six toggle rows (歌词显示 / 歌词面板透明 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，
     // 默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
     expect(toggles.length).toBe(6)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
-    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
-    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
-    expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
-    expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
-    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开）
+    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开，紧跟歌词卡片下方）
+    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 频谱显示
+    expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
+    expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 进度条显示
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
     // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -7900,13 +8075,13 @@ describe('dsh-music-player client render smoke', () => {
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the lyric-panel ghost toggle（紧跟歌词卡片下方）
+    act(() => { toggles[1].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // turn OFF the progress toggle
-    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the quality toggle
-    act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the bar-bg toggle
     act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the lyric-panel ghost toggle
+    // turn OFF the quality toggle
+    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the bar-bg toggle
     act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
@@ -7955,11 +8130,11 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles2 = [...container2.querySelectorAll('.dsh-music-toggle')]
     expect(toggles2[0].getAttribute('aria-checked')).toBe('false') // lyric restored OFF
-    expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
-    expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // quality restored OFF
-    expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // progress restored OFF
-    expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
-    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
+    expect(toggles2[1].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
+    expect(toggles2[2].getAttribute('aria-checked')).toBe('true')  // viz restored ON
+    expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // quality restored OFF
+    expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // progress restored OFF
+    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -8167,5 +8342,301 @@ describe('dsh-music-player client render smoke', () => {
     const range2 = container2.querySelector('.dsh-music-config-range')
     expect(Number(range2.value)).toBe(20)
     expect(container2.querySelector('.dsh-music-config-val').textContent).toBe('20%')
+  })
+})
+
+describe('版本更新弹窗（What\'s New）', () => {
+  // 带 What's New 四件套的 manifest 夹具。日期/标题与真数据无关，只验证渲染与流转。
+  function wnManifest(state) {
+    const entry = {
+      version: '0.7.3', date: '2026-08-30', title: '测试版本主题',
+      sections: [{ type: 'feature', items: ['新功能甲'] }, { type: 'fix', items: ['修复乙'] }],
+    }
+    return {
+      ...baseManifest(),
+      version: '0.7.3', description: '测试简介文案',
+      whatsNew: entry,
+      whatsNewHistory: [
+        entry,
+        { version: '0.7.1', date: '2026-08-01', sections: [{ type: 'improve', items: ['旧版优化'] }] },
+      ],
+      whatsNewWelcome: { title: '欢迎使用 DSH 音乐播放器', sections: [{ type: 'feature', items: ['首装卖点一'] }] },
+      whatsNewState: state,
+    }
+  }
+
+  // 挂载播放条 + 播放面板（弹窗 portal 到 body，断言都查 document.body）。
+  async function mountPanel() {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    return { container, root }
+  }
+
+  it('升级状态：延迟自动弹出当前版更新内容；关闭后写入已看标记', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('upgrade')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      // 首屏数据就绪后 ~600ms 才弹（弹窗 portal 到 body）
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '新版本 v0.7.3')
+      // 头部常驻插件名：脱离面板也能一眼看出是哪个插件的更新说明
+      expect(document.body.querySelector('.dsh-music-whatsnew-app').textContent).toBe('DSH音乐播放器')
+      expect(document.body.textContent).toContain('测试版本主题')
+      expect(document.body.textContent).toContain('新功能甲')
+      expect(document.body.textContent).toContain('修复乙')
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge').textContent).toBe('NEW')
+      // 历史折叠默认收起（旧版条目不可见），点开后出现
+      expect(document.body.textContent).not.toContain('旧版优化')
+      const toggle = document.body.querySelector('.dsh-music-whatsnew-hist-toggle')
+      act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.textContent).toContain('旧版优化')
+      // CTA 关闭弹窗 + 已看标记经 Host prefs 写出（~800ms 去抖 flush）
+      const cta = [...document.body.querySelectorAll('.dsh-music-whatsnew-foot button')]
+        .find((b) => b.textContent === '开始体验')
+      act(() => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
+      const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
+      expect(post).toBeTruthy()
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.3')
+      expect(prefsServer['dsh-music-seen-version']).toBe('0.7.3')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('首装状态：欢迎模式展示卖点（无 NEW 徽章，CTA 为「开始使用」）', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('fresh')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '欢迎使用 DSH 音乐播放器')
+      // welcome 标题本身已含插件名，头部不再重复一行
+      expect(document.body.querySelector('.dsh-music-whatsnew-app')).toBeNull()
+      expect(document.body.textContent).toContain('首装卖点一')
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge')).toBeNull()
+      const cta = [...document.body.querySelectorAll('.dsh-music-whatsnew-foot button')]
+        .find((b) => b.textContent === '开始使用')
+      expect(cta).toBeTruthy()
+      act(() => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('已看过（seen）：不再自动弹出', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('seen')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      // 越过 600ms 自动触发点后再确认没有弹窗
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('降级安装（downgrade）：不弹，且静默把已看标记改写为当前版', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('downgrade')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      // 静默补写：避免用户在新旧版本间来回切换时反复被打扰
+      await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
+      const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
+      expect(post).toBeTruthy()
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.3')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('关于页「更新日志」可手动打开完整历史（history 模式不折叠）', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('seen') // seen：确认自动弹不会发生，弹出的只可能是手动入口
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      // 打开面板 → 关于 tab → 「更新日志 | 查看」
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const viewBtn = await waitForText(container, '.dsh-music-about-btn', '查看')
+      act(() => { viewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '更新日志')
+      // history 模式：中性标题（无 NEW 徽章）、完整历史直列（无折叠开关）
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge')).toBeNull()
+      expect(document.body.querySelector('.dsh-music-whatsnew-hist-toggle')).toBeNull()
+      expect(document.body.textContent).toContain('旧版优化')
+      expect(document.body.textContent).toContain('v0.7.1')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+})
+
+// ---- 每日新闻播报页签（NewsPane）冒烟 ----
+describe('news pane（新闻播报页签）', () => {
+  it('列表层渲染期次（待播徽标/类别 chips/定时状态行）', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      expect(tab).toBeTruthy()
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 状态行：⏰ 每日定时 + 同步状态
+      expect(container.textContent).toContain('⏰ 每日定时')
+      expect(container.textContent).toContain('已同步 · 1 班次')
+      // 期次行：标题 + 待播徽标 + 类别 chips
+      expect(container.textContent).toContain('早间新闻播报')
+      expect(container.textContent).toContain('待播')
+      expect(container.textContent).toContain('热点 2 · 国内 3 · AI 2')
+      // 已播的旧期次不显示待播徽标：整行文本不含「待播」（fixture 第二条 played=true）
+      const rows = [...container.querySelectorAll('.dsh-music-track')]
+      const playedRow = rows.find((r) => r.textContent.includes('晚间新闻播报'))
+      expect(playedRow).toBeTruthy()
+      expect(playedRow.textContent.includes('待播')).toBe(false)
+    } finally { }
+  })
+
+  it('详情层渲染类别分组条目，可切文字版', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 点期次标题进详情
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 类别小节 + 条目（meta fixture）
+      expect(container.textContent).toContain('热点（2）')
+      expect(container.textContent).toContain('1. 政策发布会召开')
+      expect(container.textContent).toContain('新华社 · 08:02')
+      // 切文字版：来源行 + 免责尾注结构（文字版渲染同一 meta）
+      const readBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '文字版')
+      expect(readBtn).toBeTruthy()
+      act(() => { readBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('2026-05-30 · 共 7 条')
+      expect(container.textContent).toContain('—— 新华社 · 08:02')
+      // 返回条目视图
+      const backBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '◀ 条目视图')
+      act(() => { backBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('▶ 播放整期')
+    } finally { }
+  })
+
+  it('定时编辑器：班次行/默认类别/同步状态渲染，保存触发 POST', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 班次行 + 勾选 + 范围摘要 + 同步状态
+      expect(container.textContent).toContain('收集后立即播放')
+      expect(container.textContent).toContain('已同步 · 1 班次')
+      expect(container.querySelector('input[type="time"]')).toBeTruthy()
+      // 默认类别 chips 全部渲染（热点在第一）
+      const chips = [...container.querySelectorAll('.dsh-music-subtab')].map((b) => b.textContent)
+      expect(chips.indexOf('热点')).toBeLessThan(chips.indexOf('国内'))
+      // 保存 → POST body 携带班次
+      const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '保存')
+      act(() => { saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(newsScheduleServer.shifts.length).toBe(1)
+      expect(newsScheduleServer.shifts[0].time).toBe('08:00')
+    } finally { }
+  })
+
+  it('新闻期次播放时显示字幕（走 /dsh-music/news/<id>/text 而非 /dsh-music/book/）', async () => {
+    // Regression：loadBookSubtitle 曾硬编码 /dsh-music/book/<id>/text；新闻期次是虚拟书
+    // （url=/dsh-music/news/<id>），打到不存在的路由 → 无声幕。现改用 book.url 作基座。
+    bookTextFixture = '这是新闻播报的块字幕文本。'
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    const audios = []
+    class NewsAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', NewsAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const playBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '▶ 播放整期')
+      act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 给媒体时长与位置，触发 updateLyric 选第 0 句
+      const audio = audios[0]
+      if (audio) { audio.duration = 10; audio.currentTime = 0; act(() => { audio.emit('timeupdate') }) }
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('这是新闻播报')
+    } finally {
+      bookTextFixture = ''
+    }
   })
 })
