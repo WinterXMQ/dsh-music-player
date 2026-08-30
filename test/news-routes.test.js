@@ -256,7 +256,14 @@ describe('news 路由', () => {
       expect(t.ok).toBe(true)
       expect(t.from).toBe(0)
       expect(t.text).toContain('您好，这里是早间新闻播报')
-      expect(t.text).toContain('第一条，政策发布会召开')
+      // 字幕按条切分：每条新闻是一个完整块（开头「第N条」、含标题/摘要、结尾「以上消息来自来源」）。
+      const firstItemChunk = m.itemChunk[0]
+      const itemText = makeRes()
+      await handler(makeReq({ url: `/dsh-music/news/${id}/text?from=${firstItemChunk}` }), itemText)
+      const it = JSON.parse(itemText.body)
+      expect(it.ok).toBe(true)
+      expect(it.text).toMatch(/^第[一二三四五六七八九十]+条，政策发布会召开/)
+      expect(it.text).toContain('以上消息来自新华社。')
     } finally { cleanup() }
   })
 
