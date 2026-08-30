@@ -169,6 +169,10 @@ async function fetchStub(url, opts) {
   if (u.startsWith('/dsh-music/news/') && u.endsWith('/meta')) {
     return jsonRes(newsMetaFixture)
   }
+  if (u.startsWith('/dsh-music/news/') && u.includes('/text?from=')) {
+    const from = parseInt(new URL('http://x' + u).searchParams.get('from') || '0', 10) || 0
+    return jsonRes({ ok: true, from, text: bookTextFixture })
+  }
   if (u === '/dsh-music/prefs') {
     if (o && o.method === 'POST') {
       const body = JSON.parse(o.body || '{}')
@@ -8581,5 +8585,58 @@ describe('news pane（新闻播报页签）', () => {
       expect(newsScheduleServer.shifts.length).toBe(1)
       expect(newsScheduleServer.shifts[0].time).toBe('08:00')
     } finally { }
+  })
+
+  it('新闻期次播放时显示字幕（走 /dsh-music/news/<id>/text 而非 /dsh-music/book/）', async () => {
+    // Regression：loadBookSubtitle 曾硬编码 /dsh-music/book/<id>/text；新闻期次是虚拟书
+    // （url=/dsh-music/news/<id>），打到不存在的路由 → 无声幕。现改用 book.url 作基座。
+    bookTextFixture = '这是新闻播报的块字幕文本。'
+    manifest = { ...baseManifest(), ttsConfigured: true, ttsReason: '', books: [] }
+    const audios = []
+    class NewsAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', NewsAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const playBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '▶ 播放整期')
+      act(() => { playBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 给媒体时长与位置，触发 updateLyric 选第 0 句
+      const audio = audios[0]
+      if (audio) { audio.duration = 10; audio.currentTime = 0; act(() => { audio.emit('timeupdate') }) }
+      const lyric = container.querySelector('.dsh-music-bar-lyric')
+      expect(lyric).toBeTruthy()
+      expect(lyric.textContent).toContain('这是新闻播报')
+    } finally {
+      bookTextFixture = ''
+    }
   })
 })

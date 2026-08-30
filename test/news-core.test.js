@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   PRESET_CATEGORIES, LIMITS, cnOrdinal, formatDateCn, sanitizeEditionInput,
   renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown,
-  summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs, runStateAlive,
+  summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
+  sanitizeModelSelection, runStateAlive,
 } from '../lib/news-core.js'
 
 const VALID_BODY = {
@@ -220,6 +221,32 @@ describe('sanitizeSchedulePrefs', () => {
     const prev = { prefVersion: 3, syncedVersion: 3 }
     expect(sanitizeSchedulePrefs({ shifts: [] }, prev).prefVersion).toBe(3)
     expect(sanitizeSchedulePrefs({ shifts: [] }, prev).syncedVersion).toBe(3)
+  })
+  it('model 字段规整（用户选的新闻会话模型）', () => {
+    const p = sanitizeSchedulePrefs({ model: { provider: 'deepseek', model: 'deepseek-chat' } })
+    expect(p.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    // 非法/空 model → null（= 跟随当前活跃会话）
+    expect(sanitizeSchedulePrefs({ model: { provider: '', model: 'x' } }).model).toBe(null)
+    expect(sanitizeSchedulePrefs({ model: {} }).model).toBe(null)
+    expect(sanitizeSchedulePrefs({ model: null }).model).toBe(null)
+  })
+  it('model 从上一版保留', () => {
+    const prev = { model: { provider: 'deepseek', model: 'deepseek-chat' } }
+    expect(sanitizeSchedulePrefs({ shifts: [] }, prev).model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+  })
+})
+
+describe('sanitizeModelSelection', () => {
+  it('有效选择原样保留', () => {
+    expect(sanitizeModelSelection({ provider: ' deepseek ', model: ' deepseek-chat ' }))
+      .toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+  })
+  it('provider 或 model 缺失 → null', () => {
+    expect(sanitizeModelSelection({ provider: 'deepseek' })).toBe(null)
+    expect(sanitizeModelSelection({ model: 'deepseek-chat' })).toBe(null)
+    expect(sanitizeModelSelection({})).toBe(null)
+    expect(sanitizeModelSelection(null)).toBe(null)
+    expect(sanitizeModelSelection('x')).toBe(null)
   })
 })
 

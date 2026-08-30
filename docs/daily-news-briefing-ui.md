@@ -164,6 +164,9 @@
 
 ### 4.1 交互细节
 
+- **新闻会话模型**（「启用每日定时」下方）：provider → model 两级下拉，数据来自
+  `GET /dsh-music/news/models`；不选 = 跟随当前活跃会话模型。该模型用于创建专用
+  「新闻简报」会话（见 §4.2），保存在 `schedulePrefs.model`。
 - **班次行**：时间为 `<input type="time">`（步进 1 分钟）；**「收集后立即播放」勾选框，
   默认勾选**——勾选 = 到点收集并自动开播（`autoplay:true`）；不勾选 = **静默收集**
   （只生成/更新期次不出声，进入待播列表，见 §3.1）。行尾 [▶] **立即执行**、[🗑] 删除
@@ -195,13 +198,15 @@
 ### 4.2 生效通路（面板 → agent → DSH schedule）
 
 **自动同步（已实现，为默认路径）**：面板「同步到定时任务」按钮调用
-`POST /dsh-music/news/schedule/sync`，Host 端把同步指令作为 user 消息通过
-`agent.followup()` **直接注入当前活跃会话**（镜像 harness schedule 插件投递提醒的官方
-模式：同构 user 消息 + followup 唤醒）——agent 被唤醒后自动按偏好
-`schedule_create`/`schedule_delete` 并 `markSynced` 回写，**用户全程无需打字**。
-班次行「▶ 立即执行」同理走 `POST /dsh-music/news/run-now` 自动触发。
-注入目标：优先「正在运行」的 root agent，否则注册序最后一个；建议在专用「新闻简报」
-会话里点同步（它就是当时的活跃会话）。agents 服务不可用时优雅回退为「复制指令」。
+`POST /dsh-music/news/schedule/sync`，Host 端**先自动创建/复用专用「新闻简报」会话**
+（`ensureNewsSession`：`ctx.agents.create`，模型取面板「新闻会话模型」选择器或当前活跃
+会话；`newsSessionId` 持久化复用），再把同步指令作为 user 消息通过 `agent.followup()`
+**直接注入该专用会话**（镜像 harness schedule 插件投递提醒的官方模式：同构 user 消息 +
+followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`schedule_delete` 并
+`markSynced` 回写，**用户全程无需打字、无需手动开会话**。
+班次行「▶ 立即执行」同理走 `POST /dsh-music/news/run-now` 自动触发并注入同一专用会话。
+专用会话不可用（无 agents 服务/创建失败）时优雅回退：优先「正在运行」的 root agent，
+否则注册序最后一个，再不行回退「复制指令」。
 
 > 为什么不直写 `schedule/change` 事件：那需要依赖 `@deepseek-ai/dsh-schedule` 的内部
 > 记录构造器与版本化格式（harness 升级即破坏），且绕过 agent 的语义层。`followup`
@@ -285,9 +290,9 @@
  → agent 按偏好 schedule_create / schedule_delete（不勾选的班次提醒内容注明静默收集），回报结果并回写同步版本号
  → 状态行翻「已同步 · N 班次」；此后每个班次到点走流 B
 ```
-注意：同步动作请在**专用「新闻简报」会话**（推荐）或常驻主会话里做——定时任务与每轮
-收集都归属并发生在创建它的会话里（DSH schedule 会话级生效，见功能设计 §7.5），
-专用会话可让收集历史不污染主工作会话。
+注意：同步动作会自动创建/复用**专用「新闻简报」会话**，定时任务与每轮收集都归属并发生
+在该会话里（DSH schedule 会话级生效，见功能设计 §7.5），收集历史不污染主工作会话，
+用户无需手动开会话。
 
 **流 C · 错过/回看（收集好的数据列表）**：打开面板 → 新闻播报页签 → 列表里「待播」徽标的期次
 （定时没听到 / 静默收集的都在这）→ 点行进详情 → 点「▶ 播放整期」，或点类别 ▶ 播某类，
@@ -337,8 +342,8 @@
 |---|---|
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
-| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`）、`newsSyncState`、`currentItem` 高亮映射 |
-| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，prefs 持久化，含 `prefVersion`）；`POST /dsh-music/news/schedule/synced`（agent 回写同步版本号，`news_schedule` 工具内部调用）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`） |
+| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, model:{provider,model}?, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`，`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
+| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，prefs 持久化，含 `prefVersion`）；`POST /dsh-music/news/schedule/synced`（agent 回写同步版本号，`news_schedule` 工具内部调用）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`ensureNewsSession()`（同步时自动创建/复用专用「新闻简报」会话，`newsSessionId` 持久化复用） |
 | 提示词 | news 系统提示词 section 动态携带定时偏好 + 同步状态（每次请求重渲染） |
 | 工具 | `news_broadcast` 之外新增轻量 `news_schedule`（action: get / begin / markSynced / reportFailure），供 agent 上报开始收集、查询偏好、回报同步完成与上报收集失败 |
 | intent 分支 | `intent.kind === 'news'` → `pendingId = 'news:'+id`，走 book 同构的加载/播放管线（换 URL 前缀 `/dsh-music/news/`） |

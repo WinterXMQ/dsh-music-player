@@ -304,8 +304,14 @@
 - **归属会话语义（重要）**：定时任务与收集轮次都发生在**创建/同步它的那个会话**里
   （schedule/change 事件与 ScheduleRuntime 均归属该会话的根 agent），既不是自动新建的
   专用会话，也不跟随用户当前打开的会话——切到别的会话聊天，收集照常在归属会话发生。
-  因此**建议专门开一个「新闻简报」会话**做同步与承载：收集历史与主工作会话隔离，
-  会话存活即定时存活。跨会话不可见。
+  **已实现（M4 演进）：同步时插件自动创建/复用专用「新闻简报」会话**（`ctx.agents.create`，
+  模型取面板「新闻会话模型」选择器或当前活跃会话；`newsSessionId` 持久化复用；创建失败
+  优雅回退当前活跃会话），定时任务与每轮收集都归属该专用会话，收集历史与主工作会话隔离，
+  会话常驻即定时常驻。跨会话不可见。
+  **关键：创建时必须在 `setup` 里 mount 默认 standing preset**（`agentPresets.mount(agentCtx)`，
+  `meta.agentPreset` 记录 resolved id）——`web_search`/`web_fetch` 等工具是随 preset 按会话
+  装配的，不 mount 的裸会话只有插件全局注册的 `music_play`/`news_broadcast`/`news_schedule`，
+  会因缺 `web_search` 而无法收集（实测踩坑）。
 - 提醒内容（content）写明播报流程（搜索类别、条数、班次标题、是否 `autoplay:false`、
   时段守卫），到点注入会话并驱动 agent 执行。
 

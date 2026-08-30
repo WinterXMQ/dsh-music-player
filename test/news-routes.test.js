@@ -45,7 +45,7 @@ function makeFs(rootDir) {
   }
 }
 
-function boot({ agentsService = null } = {}) {
+function boot({ agentsService = null, llm = null, agentPresets = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
   const prevHome = process.env.HOME
   const prevDshHome = process.env.DSH_HOME
@@ -60,8 +60,13 @@ function boot({ agentsService = null } = {}) {
     tools: { register: (tool) => { tools.push(tool) } },
     systemPrompt: { section: () => {} },
     effect: (fn) => { fn() },
-    // 懒获取服务（与真实宿主一致）：agents 仅在传入了 agentsService 时可见。
-    get: (k) => (k === 'agents' ? agentsService : undefined),
+    // 懒获取服务（与真实宿主一致）：agents / llm / agentPresets 仅在传入时才可见。
+    get: (k) => {
+      if (k === 'agents') return agentsService
+      if (k === 'llm') return llm
+      if (k === 'agentPresets') return agentPresets
+      return undefined
+    },
   })
   const handler = registered.filter((r) => r.kind === 'prefix' && r.path === '/dsh-music')[0]?.handler || null
   const newsBroadcast = tools.find((t) => t.name === 'news_broadcast') || null
@@ -385,20 +390,6 @@ describe('news 路由', () => {
 })
 
 describe('自动化通道（agents 注入 / fallback）', () => {
-  const makeAgents = () => {
-    const injected = []
-    const makeAgent = (id, status) => ({
-      id,
-      session: {},
-      status,
-      followup: (msg) => { injected.push({ id, status, msg }) },
-    })
-    return {
-      injected,
-      service: { roots: () => [makeAgent('agent-early', 'idle'), makeAgent('agent-live', 'running')] },
-    }
-  }
-
   it('同步：指令注入「正在运行」的 agent，文本含同步指引与 markSynced', async () => {
     const agents = makeAgents()
     const { handler, cleanup } = boot({ agentsService: agents.service })
@@ -488,3 +479,181 @@ describe('自动化通道（agents 注入 / fallback）', () => {
     } finally { cleanup() }
   })
 })
+
+describe('专用「新闻简报」会话 + 模型选择', () => {
+  it('同步：优先复用已持久化的专用会话（而非当前活跃会话）', async () => {
+    // 预置一个「专用新闻简报会话」id，并让 agents 服务能 get 到它。
+    const agents = makeAgents({ dedicated: { id: 'dedicated-news-1' } })
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      // 直接把 newsSessionId 写进持久化文件，模拟「已创建过专用会话」。
+      const file = join(homeOf(agents), '.dsh', 'music-player-news.json')
+      mkdirSync(join(homeOf(agents), '.dsh'), { recursive: true })
+      writeFileSync(file, JSON.stringify({ version: 1, editions: [], schedulePrefs: {}, runState: null, failures: [], newsSessionId: 'dedicated-news-1' }), 'utf8')
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.target).toBe('dedicated-news-1') // 走专用会话而非 running 的 agent-live
+      expect(agents.injected.length).toBe(1)
+      expect(agents.injected[0].msg.content[0].text).toContain('专用「新闻简报」会话')
+    } finally { cleanup() }
+  })
+
+  it('无模型可建（agents 无 options）时优雅回退到当前活跃会话', async () => {
+    const agents = makeAgents()
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.target).toBe('agent-live')
+    } finally { cleanup() }
+  })
+
+  it('有模型可建时调用 agents.create 创建专用会话并持久化 id', async () => {
+    let created = null
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created = opts
+        // 真实 harness 中创建的 agent id = 传入的 sessionId。
+        return { agent: { id: opts.sessionId, session: {}, followup: (msg) => agents.injected.push({ id: opts.sessionId, status: 'idle', msg }) } }
+      },
+    })
+    // 给 agent-live 补 options，使 ensureNewsSession 有模型可建。
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      // 先配置一个班次，走 sync 分支（delete-all 分支不新建会话）。
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(created).toBeTruthy()
+      expect(created.agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+      expect(created.sessionId.startsWith('news-briefing-')).toBe(true)
+      // 已持久化 newsSessionId
+      const file = join(homeOf(agents), '.dsh', 'music-player-news.json')
+      const saved = JSON.parse(readFileSync(file, 'utf8'))
+      expect(saved.newsSessionId).toBe(created.sessionId)
+      expect(data.target).toBe(created.sessionId)
+    } finally { cleanup() }
+  })
+
+  it('有 presets 服务时创建会话会装配标准组合（mount 默认 preset，含 web_search）', async () => {
+    let created = null
+    let mounted = null
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created = opts
+        return { agent: { id: opts.sessionId, session: {}, followup: () => {} } }
+      },
+    })
+    const live = agents.service.get('agent-live')
+    live.options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const presets = {
+      resolve: async () => ({ id: 'default-preset' }),
+      mount: async (agentCtx, id) => { mounted = { agentCtx, id } },
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, agentPresets: presets })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      expect(created).toBeTruthy()
+      expect(created.meta.agentPreset).toBe('default-preset')
+      expect(typeof created.setup).toBe('function')
+      await created.setup({}) // 触发 setup 会 mount 默认 preset
+      expect(mounted).toEqual({ agentCtx: {}, id: 'default-preset' })
+    } finally { cleanup() }
+  })
+
+  it('GET /news/models 返回 llm 服务的 provider 与模型', async () => {
+    const { handler, cleanup } = boot({ llm: makeLlm() })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/models' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.providers).toEqual([
+        { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'deepseek-chat' }] },
+      ])
+    } finally { cleanup() }
+  })
+
+  it('GET /news/schedule 返回 newsSessionId（面板展示会话状态）', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news/schedule' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect('newsSessionId' in data).toBe(true)
+    } finally { cleanup() }
+  })
+})
+
+// 供 makeAgents 相关测试：拿到 boot 使用的 HOME（boot 里 DSH_HOME = HOME/.dsh）。
+function homeOf() { return process.env.HOME }
+
+// 假 agents 服务：roots / get / 可选 create。opts.dedicated 注入一个「专用新闻简报会话」agent。
+function makeAgents(opts = {}) {
+  const injected = []
+  const base = [
+    { id: 'agent-early', status: 'idle', session: {} },
+    { id: 'agent-live', status: 'running', session: {} },
+  ]
+  if (opts.dedicated) {
+    base.push({ id: opts.dedicated.id, status: opts.dedicated.status || 'idle', session: {}, ...(opts.dedicated.options ? { options: opts.dedicated.options } : {}) })
+  }
+  const agents = base.map((a) => ({ ...a, followup: (msg) => injected.push({ id: a.id, status: a.status, msg }) }))
+  const byId = new Map(agents.map((a) => [a.id, a]))
+  return {
+    injected,
+    service: {
+      roots: () => [...byId.values()],
+      get: (id) => byId.get(id),
+      ...(opts.agentsCreate ? { create: opts.agentsCreate } : {}),
+    },
+  }
+}
+
+// 假 llm 服务：listProviders + listModels，供 /news/models 路由测试。
+function makeLlm() {
+  return {
+    listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
+    listModels: async (provider) => {
+      if (provider === 'deepseek') return [{ provider: 'deepseek', id: 'deepseek-chat', name: 'deepseek-chat' }]
+      return []
+    },
+  }
+}
