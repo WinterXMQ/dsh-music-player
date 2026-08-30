@@ -5299,9 +5299,9 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    // 第 3 个开关 = 音质徽章显示（位于频谱之后、进度条之前），当前 OFF
-    expect(toggles[2].getAttribute('aria-checked')).toBe('false')
-    act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 第 4 个开关 = 音质徽章显示（歌词显示/歌词面板透明/频谱之后、进度条之前），当前 OFF
+    expect(toggles[3].getAttribute('aria-checked')).toBe('false')
+    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // 返回播放条 → 音质芯片恢复
     const libraryTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
@@ -5338,9 +5338,9 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    // 第 5 个开关 = 播放条背景显示（位于进度条之后）
-    expect(toggles[4].getAttribute('aria-checked')).toBe('true')
-    act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // 第 6 个开关 = 播放条背景显示（位于进度条之后）
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true')
+    act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     // 返回播放条：bare class 加上，内容（歌名）仍保留
     const libraryTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
@@ -7971,16 +7971,16 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // six toggle rows (歌词显示 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示 / 歌词面板透明)，
+    // six toggle rows (歌词显示 / 歌词面板透明 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，
     // 默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
     expect(toggles.length).toBe(6)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
-    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 频谱显示
-    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
-    expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 进度条显示
-    expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
-    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开）
+    expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开，紧跟歌词卡片下方）
+    expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 频谱显示
+    expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
+    expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 进度条显示
+    expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
 
     // 歌词动效分段选择器：四个选项，默认 none（无动效）选中（它排在频谱样式选择器之前）
     const segBtns = [...container.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -8004,13 +8004,13 @@ describe('dsh-music-player client render smoke', () => {
 
     // turn OFF the lyric toggle
     act(() => { toggles[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the lyric-panel ghost toggle（紧跟歌词卡片下方）
+    act(() => { toggles[1].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     // turn OFF the progress toggle
-    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the quality toggle
-    act(() => { toggles[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the bar-bg toggle
     act(() => { toggles[4].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
-    // turn OFF the lyric-panel ghost toggle
+    // turn OFF the quality toggle
+    act(() => { toggles[3].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    // turn OFF the bar-bg toggle
     act(() => { toggles[5].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) }) // debounce flush
     const lyricPost = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-show-lyric'])
@@ -8059,11 +8059,11 @@ describe('dsh-music-player client render smoke', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
     const toggles2 = [...container2.querySelectorAll('.dsh-music-toggle')]
     expect(toggles2[0].getAttribute('aria-checked')).toBe('false') // lyric restored OFF
-    expect(toggles2[1].getAttribute('aria-checked')).toBe('true')  // viz restored ON
-    expect(toggles2[2].getAttribute('aria-checked')).toBe('false') // quality restored OFF
-    expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // progress restored OFF
-    expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
-    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
+    expect(toggles2[1].getAttribute('aria-checked')).toBe('false') // lyric-panel ghost restored OFF
+    expect(toggles2[2].getAttribute('aria-checked')).toBe('true')  // viz restored ON
+    expect(toggles2[3].getAttribute('aria-checked')).toBe('false') // quality restored OFF
+    expect(toggles2[4].getAttribute('aria-checked')).toBe('false') // progress restored OFF
+    expect(toggles2[5].getAttribute('aria-checked')).toBe('false') // bar-bg restored OFF
     // 歌词显示恢复为 OFF → 动效配置行随之隐藏；重新打开歌词后出现，且跨重启
     // 恢复了之前选择的 karaoke。
     const segBtns2 = [...container2.querySelectorAll('.dsh-music-config-seg-btn')]
@@ -8278,12 +8278,12 @@ describe('版本更新弹窗（What\'s New）', () => {
   // 带 What's New 四件套的 manifest 夹具。日期/标题与真数据无关，只验证渲染与流转。
   function wnManifest(state) {
     const entry = {
-      version: '0.7.2', date: '2026-08-30', title: '测试版本主题',
+      version: '0.7.3', date: '2026-08-30', title: '测试版本主题',
       sections: [{ type: 'feature', items: ['新功能甲'] }, { type: 'fix', items: ['修复乙'] }],
     }
     return {
       ...baseManifest(),
-      version: '0.7.2', description: '测试简介文案',
+      version: '0.7.3', description: '测试简介文案',
       whatsNew: entry,
       whatsNewHistory: [
         entry,
@@ -8313,7 +8313,7 @@ describe('版本更新弹窗（What\'s New）', () => {
     const { container, root } = await mountPanel()
     try {
       // 首屏数据就绪后 ~600ms 才弹（弹窗 portal 到 body）
-      await waitForText(document.body, '.dsh-music-whatsnew-title', '新版本 v0.7.2')
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '新版本 v0.7.3')
       // 头部常驻插件名：脱离面板也能一眼看出是哪个插件的更新说明
       expect(document.body.querySelector('.dsh-music-whatsnew-app').textContent).toBe('DSH音乐播放器')
       expect(document.body.textContent).toContain('测试版本主题')
@@ -8333,8 +8333,8 @@ describe('版本更新弹窗（What\'s New）', () => {
       await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
       const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
       expect(post).toBeTruthy()
-      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.2')
-      expect(prefsServer['dsh-music-seen-version']).toBe('0.7.2')
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.3')
+      expect(prefsServer['dsh-music-seen-version']).toBe('0.7.3')
     } finally {
       root.unmount(); container.remove()
     }
@@ -8387,7 +8387,7 @@ describe('版本更新弹窗（What\'s New）', () => {
       await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
       const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
       expect(post).toBeTruthy()
-      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.2')
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.3')
     } finally {
       root.unmount(); container.remove()
     }
