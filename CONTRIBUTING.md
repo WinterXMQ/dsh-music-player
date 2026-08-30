@@ -10,15 +10,18 @@ dsh-music-player/
 │   ├── index.js     # Host 端：音乐扫描、HTTP 流式、歌单 CRUD、music_play 工具
 │   ├── qq.js        # QQ 音乐接口封装（登录/搜索/取链/歌词/歌单）
 │   ├── lyric.js     # 本地歌曲在线歌词兜底：LRCLIB 封装 + 匹配打分 + QQ→LRCLIB 编排
+│   ├── whatsnew.js  # 版本更新弹窗：更新条目数据 + 首装/升级判定（whatsNewState）
 │   └── client.js    # Web 端：浏览器里的播放条 / 播放面板 / 频谱 / 歌单
 ├── docs/
 │   ├── playlists-design.md        # 自建歌单功能设计定稿（v3）
 │   ├── online-music-feasibility.md# 在线 QQ 音乐功能实现文档
-│   └── online-lyrics-feasibility.md # 本地歌曲在线歌词功能实现文档
+│   ├── online-lyrics-feasibility.md # 本地歌曲在线歌词功能实现文档
+│   └── whatsnew-design.md         # 版本更新弹窗设计定稿
 ├── cordis.patch.yml # 把插件行插入 profile 的 bundle patch
 ├── test/
 │   ├── index.test.js  # Host 端 vitest（假 ctx + 临时目录驱动真实路由）
 │   ├── lyric.test.js  # lyric.js 单测（打分/归一化/getOnlineLyric 编排）
+│   ├── whatsnew.test.js # whatsnew.js 单测（semver 比较/判定/数据完整性）
 │   └── client.test.js # Web 端渲染冒烟/交互测试（jsdom + react-dom）
 └── package.json      # 声明 dsh.bundle manifest 与 test/ci scripts
 ```
@@ -60,10 +63,14 @@ npm run test:watch  # 监听模式
 
 ## Releasing / 发布新版本
 
-1. 更新 `package.json` 的 `version`（npm 不允许同名同版本重复发布）。
-2. 发布到 npm：`npm publish`（需已配置 npm 账号的 2FA 或 bypass-2FA token）。
-3. 可选：把对应 tag 推到 GitHub：`git tag v<version> && git push origin v<version>`。
-4. 校验发布内容：`npm pack --dry-run`（应只含 `lib/`、`cordis.patch.yml`、`LICENSE`、`README.md`、`package.json`）。
+1. **更新 `lib/whatsnew.js`**：在 `WHATS_NEW` 数组顶部追加本版条目（`version` 与
+   `package.json` 保持一致），按 `feature` / `improve` / `fix` 分组写重点变化；
+   历史条目只保留最近 `WHATS_NEW_MAX`(10) 条。用户首次安装或升级后，播放面板会
+   自动弹出该内容（版本更新弹窗，设计见 `docs/whatsnew-design.md`）。
+2. 更新 `package.json` 的 `version`（npm 不允许同名同版本重复发布）。
+3. 发布到 npm：`npm publish`（需已配置 npm 账号的 2FA 或 bypass-2FA token）。
+4. 可选：把对应 tag 推到 GitHub：`git tag v<version> && git push origin v<version>`。
+5. 校验发布内容：`npm pack --dry-run`（应只含 `lib/`、`cordis.patch.yml`、`LICENSE`、`README.md`、`package.json`）。
 
 ## License / 许可
 

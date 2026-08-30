@@ -2616,3 +2616,84 @@ describe('dsh-music-player playlists', () => {
     } finally { cleanup() }
   })
 })
+
+describe("dsh-music-player What's New (版本更新弹窗)", () => {
+  it('manifest 下发四件套：首装为 fresh，写过已看标记后为 seen', async () => {
+    const { handler, cleanup } = boot()
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      const data = JSON.parse(res.body)
+      expect(res.status).toBe(200)
+      // 四件套：当前版条目 / 历史列表 / 欢迎内容 / 判定结论
+      expect(Array.isArray(data.whatsNewHistory)).toBe(true)
+      expect(data.whatsNewHistory.length).toBeGreaterThan(0)
+      expect(data.whatsNewWelcome && Array.isArray(data.whatsNewWelcome.sections)).toBe(true)
+      expect(['fresh', 'upgrade', 'seen', 'downgrade']).toContain(data.whatsNewState)
+      // 条目允许缺省（本版没写就不下发），但存在时必须对应当前版本号
+      if (data.whatsNew !== null) {
+        expect(data.whatsNew.version).toBe(data.version)
+      }
+      // 首装（无任何 prefs 记录）→ fresh
+      expect(data.whatsNewState).toBe('fresh')
+
+      // 客户端关闭弹窗后 POST 的已看标记：写入并持久化，判定翻转为 seen
+      const res2 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/prefs',
+        body: JSON.stringify({ prefs: { 'dsh-music-seen-version': data.version } }),
+      }), res2)
+      expect(JSON.parse(res2.body).ok).toBe(true)
+      const res3 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res3)
+      expect(JSON.parse(res3.body).whatsNewState).toBe('seen')
+      // 注：loadPrefs 每次都重读 prefs 文件，所以上一步的 seen 判定本身已证明
+      // 标记落盘——新进程重读同样能拿到。
+    } finally { cleanup() }
+  })
+
+  it('老用户启发式：无已看记录但 prefs 已有其他键 → upgrade', async () => {
+    const { handler, cleanup } = boot({
+      files: { '.dsh/music-player-prefs.json': JSON.stringify({ version: 2, prefs: { 'dsh-music-volume': '0.5' } }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(JSON.parse(res.body).whatsNewState).toBe('upgrade')
+    } finally { cleanup() }
+  })
+
+  it('降级安装判定为 downgrade；seen-version 脏值被 sanitize 丢弃', async () => {
+    const { handler, cleanup } = boot({
+      files: { '.dsh/music-player-prefs.json': JSON.stringify({ version: 2, prefs: { 'dsh-music-seen-version': '99.0.0' } }) },
+    })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/manifest' }), res)
+      expect(JSON.parse(res.body).whatsNewState).toBe('downgrade')
+
+      // POST 非版本号形态的脏值 → 被 sanitizePrefs 丢弃，原值保持不变
+      const res2 = makeRes()
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/prefs',
+        body: JSON.stringify({ prefs: { 'dsh-music-seen-version': 'not a version!' } }),
+      }), res2)
+      const res3 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/prefs' }), res3)
+      expect(JSON.parse(res3.body).prefs['dsh-music-seen-version']).toBe('99.0.0')
+    } finally { cleanup() }
+  })
+
+  it('rescan 路由同样下发 What\'s New 四件套', async () => {
+    const { handler, cleanup } = boot({ musicFiles: { 'a.mp3': 'AUDIO' } })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/rescan' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(Array.isArray(data.whatsNewHistory)).toBe(true)
+      expect(['fresh', 'upgrade', 'seen', 'downgrade']).toContain(data.whatsNewState)
+      expect(data.whatsNewWelcome && Array.isArray(data.whatsNewWelcome.sections)).toBe(true)
+    } finally { cleanup() }
+  })
+})

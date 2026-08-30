@@ -8273,3 +8273,149 @@ describe('dsh-music-player client render smoke', () => {
     expect(container2.querySelector('.dsh-music-config-val').textContent).toBe('20%')
   })
 })
+
+describe('版本更新弹窗（What\'s New）', () => {
+  // 带 What's New 四件套的 manifest 夹具。日期/标题与真数据无关，只验证渲染与流转。
+  function wnManifest(state) {
+    const entry = {
+      version: '0.7.2', date: '2026-08-30', title: '测试版本主题',
+      sections: [{ type: 'feature', items: ['新功能甲'] }, { type: 'fix', items: ['修复乙'] }],
+    }
+    return {
+      ...baseManifest(),
+      version: '0.7.2', description: '测试简介文案',
+      whatsNew: entry,
+      whatsNewHistory: [
+        entry,
+        { version: '0.7.1', date: '2026-08-01', sections: [{ type: 'improve', items: ['旧版优化'] }] },
+      ],
+      whatsNewWelcome: { title: '欢迎使用 DSH 音乐播放器', sections: [{ type: 'feature', items: ['首装卖点一'] }] },
+      whatsNewState: state,
+    }
+  }
+
+  // 挂载播放条 + 播放面板（弹窗 portal 到 body，断言都查 document.body）。
+  async function mountPanel() {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    return { container, root }
+  }
+
+  it('升级状态：延迟自动弹出当前版更新内容；关闭后写入已看标记', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('upgrade')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      // 首屏数据就绪后 ~600ms 才弹（弹窗 portal 到 body）
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '新版本 v0.7.2')
+      // 头部常驻插件名：脱离面板也能一眼看出是哪个插件的更新说明
+      expect(document.body.querySelector('.dsh-music-whatsnew-app').textContent).toBe('DSH音乐播放器')
+      expect(document.body.textContent).toContain('测试版本主题')
+      expect(document.body.textContent).toContain('新功能甲')
+      expect(document.body.textContent).toContain('修复乙')
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge').textContent).toBe('NEW')
+      // 历史折叠默认收起（旧版条目不可见），点开后出现
+      expect(document.body.textContent).not.toContain('旧版优化')
+      const toggle = document.body.querySelector('.dsh-music-whatsnew-hist-toggle')
+      act(() => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.textContent).toContain('旧版优化')
+      // CTA 关闭弹窗 + 已看标记经 Host prefs 写出（~800ms 去抖 flush）
+      const cta = [...document.body.querySelectorAll('.dsh-music-whatsnew-foot button')]
+        .find((b) => b.textContent === '开始体验')
+      act(() => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
+      const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
+      expect(post).toBeTruthy()
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.2')
+      expect(prefsServer['dsh-music-seen-version']).toBe('0.7.2')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('首装状态：欢迎模式展示卖点（无 NEW 徽章，CTA 为「开始使用」）', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('fresh')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '欢迎使用 DSH 音乐播放器')
+      // welcome 标题本身已含插件名，头部不再重复一行
+      expect(document.body.querySelector('.dsh-music-whatsnew-app')).toBeNull()
+      expect(document.body.textContent).toContain('首装卖点一')
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge')).toBeNull()
+      const cta = [...document.body.querySelectorAll('.dsh-music-whatsnew-foot button')]
+        .find((b) => b.textContent === '开始使用')
+      expect(cta).toBeTruthy()
+      act(() => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('已看过（seen）：不再自动弹出', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('seen')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      // 越过 600ms 自动触发点后再确认没有弹窗
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('降级安装（downgrade）：不弹，且静默把已看标记改写为当前版', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('downgrade')
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      // 静默补写：避免用户在新旧版本间来回切换时反复被打扰
+      await act(async () => { await new Promise((r) => setTimeout(r, 1000)) })
+      const post = prefsPosts.find((p) => p.prefs && p.prefs['dsh-music-seen-version'])
+      expect(post).toBeTruthy()
+      expect(post.prefs['dsh-music-seen-version']).toBe('0.7.2')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+
+  it('关于页「更新日志」可手动打开完整历史（history 模式不折叠）', async () => {
+    vi.resetModules(); registered = []; prefsPosts = []; prefsServer = {}
+    manifest = wnManifest('seen') // seen：确认自动弹不会发生，弹出的只可能是手动入口
+    await bootClient()
+    const { container, root } = await mountPanel()
+    try {
+      await act(async () => { await new Promise((r) => setTimeout(r, 800)) })
+      expect(document.body.querySelector('.dsh-music-whatsnew')).toBeNull()
+      // 打开面板 → 关于 tab → 「更新日志 | 查看」
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const aboutTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '关于')
+      act(() => { aboutTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const viewBtn = await waitForText(container, '.dsh-music-about-btn', '查看')
+      act(() => { viewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await waitForText(document.body, '.dsh-music-whatsnew-title', '更新日志')
+      // history 模式：中性标题（无 NEW 徽章）、完整历史直列（无折叠开关）
+      expect(document.body.querySelector('.dsh-music-whatsnew-badge')).toBeNull()
+      expect(document.body.querySelector('.dsh-music-whatsnew-hist-toggle')).toBeNull()
+      expect(document.body.textContent).toContain('旧版优化')
+      expect(document.body.textContent).toContain('v0.7.1')
+    } finally {
+      root.unmount(); container.remove()
+    }
+  })
+})
