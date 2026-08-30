@@ -7,19 +7,24 @@ Thanks for wanting to contribute to **dsh-music-player**! / 感谢你参与 dsh-
 ```
 dsh-music-player/
 ├── lib/
-│   ├── index.js     # Host 端：音乐扫描、HTTP 流式、歌单 CRUD、music_play 工具
+│   ├── index.js     # Host 端：音乐扫描、HTTP 流式、歌单 CRUD、music_play/news_broadcast/news_schedule 工具
+│   ├── news-core.js # 新闻播报纯逻辑：入参校验/口播稿模板渲染/分块/每任务保留/冷却窗/定时偏好规整
 │   ├── qq.js        # QQ 音乐接口封装（登录/搜索/取链/歌词/歌单）
 │   ├── lyric.js     # 本地歌曲在线歌词兜底：LRCLIB 封装 + 匹配打分 + QQ→LRCLIB 编排
 │   ├── whatsnew.js  # 版本更新弹窗：更新条目数据 + 首装/升级判定（whatsNewState）
-│   └── client.js    # Web 端：浏览器里的播放条 / 播放面板 / 频谱 / 歌单
+│   └── client.js    # Web 端：浏览器里的播放条 / 播放面板 / 频谱 / 歌单 / 新闻播报页签
 ├── docs/
 │   ├── playlists-design.md        # 自建歌单功能设计定稿（v3）
 │   ├── online-music-feasibility.md# 在线 QQ 音乐功能实现文档
 │   ├── online-lyrics-feasibility.md # 本地歌曲在线歌词功能实现文档
-│   └── whatsnew-design.md         # 版本更新弹窗设计定稿
+│   ├── whatsnew-design.md         # 版本更新弹窗设计定稿
+│   ├── daily-news-briefing-design.md # 每日新闻播报功能设计
+│   └── daily-news-briefing-ui.md  # 新闻播报 UI/交互设计
 ├── cordis.patch.yml # 把插件行插入 profile 的 bundle patch
 ├── test/
 │   ├── index.test.js  # Host 端 vitest（假 ctx + 临时目录驱动真实路由）
+│   ├── news-core.test.js  # news-core.js 单测（渲染/分块/保留/冷却）
+│   ├── news-routes.test.js # 新闻路由与工具冒烟（假 ctx 驱动真实 apply）
 │   ├── lyric.test.js  # lyric.js 单测（打分/归一化/getOnlineLyric 编排）
 │   ├── whatsnew.test.js # whatsnew.js 单测（semver 比较/判定/数据完整性）
 │   └── client.test.js # Web 端渲染冒烟/交互测试（jsdom + react-dom）
