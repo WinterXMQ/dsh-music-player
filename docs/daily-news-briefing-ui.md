@@ -172,6 +172,8 @@
   不等时刻；期次标题按当前时段与范围命名。因面板无直达会话通道（见 §4.2），点击后弹
   确认气泡：一键复制形如 *「立即执行我的 12:30 新闻班次：只收集科技与 AI 相关头条，
   收集完不播放」* 的精确指令，用户发送给 agent 后立即按规则执行（走 `news_broadcast`）。
+  **连点多次无副作用**（按钮仅复制，5 秒内重复点击只 toast 一次）；同一班次冷却窗
+  （10 分钟）内重复执行会被工具层跳过并提示，`force` 指令可强制重收（见功能设计 §5.1）。
 - **添加班次**：追加一行默认 `08:00 · 勾选立即播放 · 继承默认类别`；上限 6 个
   （成本与可读性平衡，超出置灰）。
 - **收集范围（班次级，点班次行展开）**：
@@ -321,6 +323,7 @@ DSH 的 schedule 是 **agent 侧工具**，面板（客户端半体）没有直�
 | 块合成中 | 播放条名称后 + 条目行尾 | `合成中… Ns` 递增计数 |
 | 块合成失败 | 播放条 | 错误文案 + 「重试」按钮（讲书同款） |
 | 待播 | 期次列表行 | 「待播」小徽标（已收集未播放：定时错过/静默收集），开播后消失 |
+| 班次执行中 | 定时状态行 + 编辑器班次行 | `⟳ 收集中…`（▶ 按钮禁点，TTL 10 分钟自动复位）；完成后出期/报失败 |
 | 班次收集失败 | 定时状态行下方 | 「⚠ 今天 12:30 班次收集失败 · \<错误摘要\> ▶ 补收」/「⚠ 12:30 收集无结果」——原因透传工具错误码与消息（不做诊断），附通用排查指引；最近 10 条，agent 经 `news_schedule` `reportFailure` 回写 |
 | 定时偏好已改未同步 | 定时状态行 / 编辑器同步状态行 | 「有未同步的修改」；已同步显示「已同步 · N 班次」 |
 | 正在播条目 | 详情列表 + 目录弹层 | 高亮（同歌单正在播样式） |
@@ -337,9 +340,9 @@ DSH 的 schedule 是 **agent 侧工具**，面板（客户端半体）没有直�
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
 | store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`）、`newsSyncState`、`currentItem` 高亮映射 |
-| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，prefs 持久化，含 `prefVersion`）；`POST /dsh-music/news/schedule/synced`（agent 回写同步版本号，`news_schedule` 工具内部调用） |
+| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，prefs 持久化，含 `prefVersion`）；`POST /dsh-music/news/schedule/synced`（agent 回写同步版本号，`news_schedule` 工具内部调用）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`） |
 | 提示词 | news 系统提示词 section 动态携带定时偏好 + 同步状态（每次请求重渲染） |
-| 工具 | `news_broadcast` 之外新增轻量 `news_schedule`（action: get / markSynced / reportFailure），供 agent 查询偏好、回报同步完成与上报收集失败 |
+| 工具 | `news_broadcast` 之外新增轻量 `news_schedule`（action: get / begin / markSynced / reportFailure），供 agent 上报开始收集、查询偏好、回报同步完成与上报收集失败 |
 | intent 分支 | `intent.kind === 'news'` → `pendingId = 'news:'+id`，走 book 同构的加载/播放管线（换 URL 前缀 `/dsh-music/news/`） |
 | 播放条 | `isNews` 判定 + 报纸图标 + 控件映射表差异点；`VoicePicker` 复用 |
 | prefs | 播放恢复结构里 news 与 book 同构（期次 id + 块号 + 字符偏移） |

@@ -142,12 +142,25 @@
     opening?: string, closing?: string,   // 可选自定义开场/结语
     voice?: string,            // MIMO_VOICES 之一，默认 prefs
     autoplay?: boolean,        // 默认 true，推送播放条开播
+    force?: boolean,           // 默认 false；冷却窗内跳过重复收集，true 强制新建
   },
   output: { editionId, categories, items, chunks, estMinutes, notice },
 }
 ```
 
-- execute 流程：校验规整 → 渲染分块 → 持久化 → `pendingIntent = { action:'play', kind:'news', id }` → 返回。
+- execute 流程：校验规整 → **冷却窗去重** → 渲染分块 → 持久化 → `pendingIntent = { action:'play', kind:'news', id }` → 返回。
+- **冷却窗幂等（防重复收集）**：同一 `originShiftId` 在冷却窗（默认 10 分钟）内再次提交
+  → 不新建，返回 `{ skipped: true, existingEditionId, notice }`（notice 告知 agent 已跳过、
+  可传 `force: true` 强制重收）。这同时兜住「连点立即执行」与「手动执行 × 定时触发撞车」
+  两个方向的重复；`force: true` 为明确要求的逃生口（事件发酵中要多份快照）。
+  同一会话 agent 运行天然串行，无并发写竞态；每任务 7 期滚动窗口是最后防线。
+- **执行中状态上报（防连点的第一道闸）**：收集阶段发生在 agent 循环内（`news_broadcast`
+  调用前），插件看不见，故由 agent 主动上报——系统提示词约定：开始收集时先调
+  `news_schedule { action:'begin', shiftId }`，Host 记录当前运行 `{ shiftId, startedAt, scope }`；
+  完成时由 `news_broadcast` / `reportFailure` 自然清除运行态。运行态带 TTL（10 分钟）懒过期
+  （agent 崩溃/漏报时自动复位）；`begin` 为尽力而为——漏报只是面板不显示执行中，功能无损。
+  面板经 `GET /dsh-music/news/runstate` 轻量轮询呈现（班次行 ▶ → ⟳ 收集中… 禁点、
+  定时状态行显示「12:30 班次收集中…」），与冷却窗（挡"刚做完又来"）前后互补。
 - `music_play` 的 pause/resume/stop/next/prev 是通用传输控制（next/prev 在讲书即跳章），新闻模式**免费继承**，不改 `music_play`。
 - 系统提示词新增一节（order 116 旁）：说明新闻播报的使用方式——先按类别用 `web_search`
   多查询（带当天日期锚定）、跨源去重、只保留可确认时效的条目、每条写 ≤ 80 字口播摘要并标注来源，
@@ -268,6 +281,8 @@
   正在播的期次内容漂移、字幕/条目↔音频块映射失效。
 - 跨班次去重由每轮搜索的时效筛选自然完成（早报过的不再是「新」头条）；提醒词可附
   「与早间班次重复的仅保留重大进展」。
+- **同一班次的重复触发由工具层冷却窗收敛**（见 §5.1）：冷却窗内重复提交 skip 不出新期，
+  会话里由 agent 说明；`force:true` 才新建。
 
 ### 7.5 定时管理
 
