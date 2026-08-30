@@ -45,17 +45,17 @@ function makeFs(rootDir) {
   }
 }
 
-function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null } = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null, home = null } = {}) {
+  const homeDir = home || mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
   const prevHome = process.env.HOME
   const prevDshHome = process.env.DSH_HOME
-  process.env.HOME = home
-  process.env.DSH_HOME = join(home, '.dsh')
+  process.env.HOME = homeDir
+  process.env.DSH_HOME = join(homeDir, '.dsh')
   const registered = []
   const tools = []
   apply({
-    shell: { resolve: (o) => o, run: async () => ({ stdout: { text: home } }) },
-    fs: makeFs(home),
+    shell: { resolve: (o) => o, run: async () => ({ stdout: { text: homeDir } }) },
+    fs: makeFs(homeDir),
     webServer: { register: (row) => { registered.push(row) } },
     tools: { register: (tool) => { tools.push(tool) } },
     systemPrompt: { section: () => {} },
@@ -75,9 +75,9 @@ function boot({ agentsService = null, llm = null, agentPresets = null, sessionTi
   const cleanup = () => {
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome
     if (prevDshHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevDshHome
-    try { rmSync(home, { recursive: true, force: true }) } catch {}
+    if (!home) { try { rmSync(homeDir, { recursive: true, force: true }) } catch {} }
   }
-  return { home, handler, newsBroadcast, newsSchedule, cleanup }
+  return { home: homeDir, handler, newsBroadcast, newsSchedule, cleanup }
 }
 
 const NEWS_BODY = {
@@ -536,6 +536,63 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
       await handler(makeReq({ url: '/dsh-music/news' }), res)
       expect(JSON.parse(res.body).editions.length).toBe(0)
     } finally { cleanup() }
+  })
+
+  it('跨重启删除：期次 sessionId 不在内存表时，resume→dispose 兜底销毁执行会话', async () => {
+    // 第一次 boot：创建执行会话并提交期次（把 sessionId 持久化进 news.json）。
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    let created = []
+    const agents1 = makeAgents({
+      agentsCreate: async (opts) => ({
+        agent: { id: opts.sessionId, session: {}, followup: () => {} },
+        dispose: async () => {},
+      }),
+    })
+    agents1.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const b1 = boot({ agentsService: agents1.service, home })
+    let editionId
+    try {
+      await b1.handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      await b1.handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), makeRes())
+      const out = await broadcast(b1.newsBroadcast, { ...NEWS_BODY, shiftId: 's1' })
+      editionId = out.editionId
+      created = [JSON.parse(readFileSync(join(home, '.dsh', 'music-player-news.json'), 'utf8')).editions[0].sessionId]
+      expect(created[0]).toBeTruthy() // 期次已持久化 sessionId
+    } finally { b1.cleanup() }
+
+    // 第二次 boot（模拟重启）：同一 HOME、agents 服务无内存句柄，但暴露 resume。
+    const resumed = []
+    const disposedResumed = []
+    const agents2 = makeAgents()
+    agents2.service.resume = async (opts) => {
+      resumed.push(opts.resumeSessionId)
+      return {
+        agent: { id: opts.resumeSessionId, session: {} },
+        dispose: async () => { disposedResumed.push(opts.resumeSessionId) },
+      }
+    }
+    agents2.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const b2 = boot({ agentsService: agents2.service, home })
+    try {
+      const del = makeRes()
+      await b2.handler(makeReq({ method: 'DELETE', url: '/dsh-music/news/' + editionId }), del)
+      expect(JSON.parse(del.body).ok).toBe(true)
+      // 本进程无句柄 → 走 resume→dispose 兜底，并立即 dispose 掉。
+      expect(resumed).toEqual(created)
+      expect(disposedResumed).toEqual(created)
+      const res = makeRes()
+      await b2.handler(makeReq({ url: '/dsh-music/news' }), res)
+      expect(JSON.parse(res.body).editions.length).toBe(0)
+    } finally {
+      b2.cleanup()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('无模型可建（agents 无 options）时 run-now 返回 fallback', async () => {
