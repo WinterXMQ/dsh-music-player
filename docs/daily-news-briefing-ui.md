@@ -194,29 +194,19 @@
 
 ### 4.2 生效通路（面板 → agent → DSH schedule）
 
-DSH 的 schedule 是 **agent 侧工具**，面板（客户端半体）没有直达会话的消息通道，因此
-采用「偏好 + 同步」两段式，分两期实现：
+**自动同步（已实现，为默认路径）**：面板「同步到定时任务」按钮调用
+`POST /dsh-music/news/schedule/sync`，Host 端把同步指令作为 user 消息通过
+`agent.followup()` **直接注入当前活跃会话**（镜像 harness schedule 插件投递提醒的官方
+模式：同构 user 消息 + followup 唤醒）——agent 被唤醒后自动按偏好
+`schedule_create`/`schedule_delete` 并 `markSynced` 回写，**用户全程无需打字**。
+班次行「▶ 立即执行」同理走 `POST /dsh-music/news/run-now` 自动触发。
+注入目标：优先「正在运行」的 root agent，否则注册序最后一个；建议在专用「新闻简报」
+会话里点同步（它就是当时的活跃会话）。agents 服务不可用时优雅回退为「复制指令」。
 
-- **v1（随 M3 落地）——提示词同步**：
-  1. 面板保存偏好到 Host（prefs）；
-  2. 插件的系统提示词 section **动态携带当前定时偏好**（每次会话请求重渲染）：
-     「用户已在面板配置新闻定时偏好（尚未同步 / 已同步）：每天 08:00 收集后立即播放、
-     12:30 仅静默收集，类别默认。当用户要求同步/应用新闻定时，或偏好与已建 schedule
-     不一致时，用 `schedule_create` / `schedule_delete` 使实际定时任务与偏好一致
-     （静默班次的提醒内容注明 `autoplay:false`），并汇报结果。」
-  3. 用户对 agent 说「同步新闻定时」（编辑器底部 ⇱ 一键复制该指令）→ agent 增删
-     schedule 至与偏好一致 → 在会话里回报创建了哪些；
-  4. 同步完成后 agent 通过 `news_schedule` 工具（action:`markSynced`）回写同步版本号，
-     面板状态行翻为「已同步」。
-- **v2（M4 深度集成，可选）——直写 schedule**：插件 Host 端注入 sessions/agents 服务，
-  直接在根会话事件日志追加 `schedule/change` 记录（依赖 `@deepseek-ai/dsh-schedule` 的
-  记录构造器），并可由插件驱动一个**专用的「新闻简报」headless 会话**承载全部收集轮次
-  （彻底不污染任何用户会话、UI 保存即生效）；代价是与 harness 内部记录格式/版本耦合。
-  v1 验证需求后再评估。
-
-> 为什么不做「面板直接创建定时任务」：client 插件只有 `slots` 注入与自身 HTTP 路由，
-> 无会话消息 API；硬造通道会绕开 DSH 的会话/调度语义。两段式把「配置」放面板（可视化、
-> 可发现），把「执行」留给 agent（复用现成 schedule 工具与生命周期管理）。
+> 为什么不直写 `schedule/change` 事件：那需要依赖 `@deepseek-ai/dsh-schedule` 的内部
+> 记录构造器与版本化格式（harness 升级即破坏），且绕过 agent 的语义层。`followup`
+> 注入是 harness 插件的公开同款模式，零内部格式耦合，agent 仍负责锚点/时区/去重。
+> 旧的「复制指令」路径保留为无 agents 服务时的降级方案。
 
 ## 5. 播放条新闻模式
 

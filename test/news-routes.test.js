@@ -45,7 +45,7 @@ function makeFs(rootDir) {
   }
 }
 
-function boot() {
+function boot({ agentsService = null } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
   const prevHome = process.env.HOME
   const prevDshHome = process.env.DSH_HOME
@@ -60,6 +60,8 @@ function boot() {
     tools: { register: (tool) => { tools.push(tool) } },
     systemPrompt: { section: () => {} },
     effect: (fn) => { fn() },
+    // 懒获取服务（与真实宿主一致）：agents 仅在传入了 agentsService 时可见。
+    get: (k) => (k === 'agents' ? agentsService : undefined),
   })
   const handler = registered.filter((r) => r.kind === 'prefix' && r.path === '/dsh-music')[0]?.handler || null
   const newsBroadcast = tools.find((t) => t.name === 'news_broadcast') || null
@@ -378,6 +380,111 @@ describe('news 路由', () => {
       expect(s1.length).toBe(LIMITS.retentionPerShift)
       expect(s2.length).toBe(1)
       expect(editions[editions.length - 1].title).toBe('别班次') // 时间倒序混合流
+    } finally { cleanup() }
+  })
+})
+
+describe('自动化通道（agents 注入 / fallback）', () => {
+  const makeAgents = () => {
+    const injected = []
+    const makeAgent = (id, status) => ({
+      id,
+      session: {},
+      status,
+      followup: (msg) => { injected.push({ id, status, msg }) },
+    })
+    return {
+      injected,
+      service: { roots: () => [makeAgent('agent-early', 'idle'), makeAgent('agent-live', 'running')] },
+    }
+  }
+
+  it('同步：指令注入「正在运行」的 agent，文本含同步指引与 markSynced', async () => {
+    const agents = makeAgents()
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      // 先配置一个班次（空配置走 delete-all 分支，是另一条用例）
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.mode).toBe('sync')
+      expect(data.target).toBe('agent-live') // 优先正在运行的会话
+      expect(agents.injected.length).toBe(1)
+      expect(agents.injected[0].msg.role).toBe('user')
+      expect(agents.injected[0].msg.content[0].text).toContain('同步新闻定时')
+      expect(agents.injected[0].msg.content[0].text).toContain('markSynced')
+      expect(agents.injected[0].msg.source).toEqual({ kind: 'plugin', plugin: 'dsh-music-player' })
+    } finally { cleanup() }
+  })
+
+  it('停用状态同步：注入「删除全部定时任务」指令', async () => {
+    const agents = makeAgents()
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({ enabled: false, defaultScope: { categories: [], topics: [] }, shifts: [] }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      expect(data.mode).toBe('delete-all')
+      expect(agents.injected[0].msg.content[0].text).toContain('删除')
+    } finally { cleanup() }
+  })
+
+  it('立即执行：注入带班次 id 与 begin 上报的执行指令', async () => {
+    const agents = makeAgents()
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's9', time: '18:00', autoplay: false, scope: { categories: ['科技'], topics: ['AI'] } }],
+        }),
+      }), makeRes())
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's9' }) }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(true)
+      const text = agents.injected[0].msg.content[0].text
+      expect(text).toContain('18:00')
+      expect(text).toContain('s9')
+      expect(text).toContain('begin')
+      expect(text).toContain('先不播放')
+      expect(text).toContain('科技')
+    } finally { cleanup() }
+  })
+
+  it('run-now 未知班次返回 404', async () => {
+    const agents = makeAgents()
+    const { handler, cleanup } = boot({ agentsService: agents.service })
+    try {
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 'nope' }) }), res)
+      expect(res.status).toBe(404)
+      expect(agents.injected.length).toBe(0)
+    } finally { cleanup() }
+  })
+
+  it('agents 服务缺失：返回 fallback:true（客户端回退复制指令）', async () => {
+    const { handler, cleanup } = boot() // 无 agentsService
+    try {
+      const res = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule/sync' }), res)
+      const data = JSON.parse(res.body)
+      expect(data.ok).toBe(false)
+      expect(data.fallback).toBe(true)
     } finally { cleanup() }
   })
 })

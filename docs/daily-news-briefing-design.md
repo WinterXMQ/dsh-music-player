@@ -294,9 +294,12 @@
   范围搜索与提交。系统提示词要求：创建新闻定时任务时必须把用户指定的范围（类别/主题/
   是否播放/条数）显式写入提醒内容，不接受模糊表述。
 - 面板保存的是插件侧「定时偏好」（prefs 持久化，含版本号，含 defaultScope 与班次级
-  scope 覆盖）；由插件的系统提示词 section 动态携带该偏好，用户说「同步新闻定时」时
-  agent 用 `schedule_create` / `schedule_delete` 使实际定时任务与偏好一致，并经
-  `news_schedule` 工具回写同步版本号。
+  scope 覆盖）；由插件的系统提示词 section 动态携带该偏好。
+- **自动同步（已实现）**：面板「同步到定时任务」按钮 → `POST /dsh-music/news/schedule/sync`
+  → Host 把同步指令经 `agent.followup()` **直接注入当前活跃会话**（镜像 harness schedule
+  插件投递提醒的官方模式），agent 自动按偏好创建/更新/删除定时任务并 `markSynced` 回写；
+  agents 服务缺失时回退「复制指令」。班次「▶ 立即执行」同理经
+  `POST /dsh-music/news/run-now` 自动触发。
 - `schedule_list` / `schedule_delete` 管理（对 agent 说「取消我的新闻定时」）。
 - **归属会话语义（重要）**：定时任务与收集轮次都发生在**创建/同步它的那个会话**里
   （schedule/change 事件与 ScheduleRuntime 均归属该会话的根 agent），既不是自动新建的
