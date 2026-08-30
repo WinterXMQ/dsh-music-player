@@ -100,9 +100,75 @@ let qqLyricFixture = null
 let prefsServer = {}
 let prefsPosts = []
 let prefsPostOpts = []
+// ---- 每日新闻播报 fixtures（NewsPane 冒烟测试用）----
+const newsEditionsFixture = [
+  {
+    id: 'news-20260530-0800-abcd', originShiftId: 's1', title: '早间新闻播报',
+    date: '2026-05-30', createdAt: Date.now(), played: false,
+    categories: [
+      { name: '热点', count: 2 }, { name: '国内', count: 3 }, { name: 'AI', count: 2 },
+    ],
+    totalItems: 7, totalChars: 1800,
+  },
+  {
+    id: 'news-20260529-1800-efgh', originShiftId: 'manual', title: '晚间新闻播报',
+    date: '2026-05-29', createdAt: Date.now() - 86400000, played: true,
+    categories: [{ name: '热点', count: 4 }],
+    totalItems: 4, totalChars: 900,
+  },
+]
+const newsMetaFixture = {
+  ok: true, id: 'news-20260530-0800-abcd', title: '早间新闻播报', date: '2026-05-30',
+  createdAt: newsEditionsFixture[0].createdAt, total: 4,
+  sections: [
+    { type: 'category', heading: '热点', fromChunk: 0, itemCount: 2 },
+    { type: 'category', heading: '国内', fromChunk: 2, itemCount: 3 },
+    { type: 'category', heading: 'AI', fromChunk: 3, itemCount: 2 },
+  ],
+  categories: [
+    { name: '热点', items: [
+      { title: '政策发布会召开', summary: '国新办今早介绍相关政策要点。', source: '新华社', url: '', publishedAt: '08:02' },
+      { title: '多地强降雨', summary: '暴雨预警继续。', source: '央视新闻', url: '', publishedAt: '' },
+    ] },
+    { name: '国内', items: [
+      { title: '国内条目一', summary: '摘要一。', source: '人民日报', url: '', publishedAt: '' },
+      { title: '国内条目二', summary: '摘要二。', source: '新华社', url: '', publishedAt: '' },
+      { title: '国内条目三', summary: '摘要三。', source: '澎湃', url: '', publishedAt: '' },
+    ] },
+    { name: 'AI', items: [
+      { title: 'AI 条目一', summary: '推理成本下降。', source: '机器之心', url: '', publishedAt: '' },
+      { title: 'AI 条目二', summary: '新模型发布。', source: '量子位', url: '', publishedAt: '' },
+    ] },
+  ],
+  charOffsets: [0, 120, 260, 380, 500], totalChars: 500,
+  itemChunk: [0, 0, 1, 2, 2, 3, 3], categoryChunk: [0, 2, 3],
+}
+const newsScheduleDefault = {
+  enabled: true, defaultScope: { categories: ['热点', '国内', '国际', '科技', '财经', '体育'], topics: [] },
+  shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
+}
+let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
 async function fetchStub(url, opts) {
   const u = String(url)
   const o = opts || {}
+  // ---- 每日新闻播报：期次列表 / 运行态 / 定时偏好 / 期次 meta ----
+  if (u === '/dsh-music/news') {
+    return jsonRes({ ok: true, editions: newsEditionsFixture })
+  }
+  if (u === '/dsh-music/news/runstate') {
+    return jsonRes({ ok: true, run: null })
+  }
+  if (u === '/dsh-music/news/schedule') {
+    if (o && o.method === 'POST') {
+      const body = JSON.parse(o.body || '{}')
+      newsScheduleServer = body
+      return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, changed: true })
+    }
+    return jsonRes({ ok: true, schedulePrefs: newsScheduleServer, failures: [] })
+  }
+  if (u.startsWith('/dsh-music/news/') && u.endsWith('/meta')) {
+    return jsonRes(newsMetaFixture)
+  }
   if (u === '/dsh-music/prefs') {
     if (o && o.method === 'POST') {
       const body = JSON.parse(o.body || '{}')
@@ -299,6 +365,7 @@ beforeEach(async () => {
   qqFetchLog = []
   lyricOnlineFixture = null
   manifest = baseManifest()
+  newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
   await bootClient()
 })
 
@@ -8417,5 +8484,102 @@ describe('版本更新弹窗（What\'s New）', () => {
     } finally {
       root.unmount(); container.remove()
     }
+  })
+})
+
+// ---- 每日新闻播报页签（NewsPane）冒烟 ----
+describe('news pane（新闻播报页签）', () => {
+  it('列表层渲染期次（待播徽标/类别 chips/定时状态行）', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      expect(tab).toBeTruthy()
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 状态行：⏰ 每日定时 + 同步状态
+      expect(container.textContent).toContain('⏰ 每日定时')
+      expect(container.textContent).toContain('已同步 · 1 班次')
+      // 期次行：标题 + 待播徽标 + 类别 chips
+      expect(container.textContent).toContain('早间新闻播报')
+      expect(container.textContent).toContain('待播')
+      expect(container.textContent).toContain('热点 2 · 国内 3 · AI 2')
+      // 已播的旧期次不显示待播徽标：整行文本不含「待播」（fixture 第二条 played=true）
+      const rows = [...container.querySelectorAll('.dsh-music-track')]
+      const playedRow = rows.find((r) => r.textContent.includes('晚间新闻播报'))
+      expect(playedRow).toBeTruthy()
+      expect(playedRow.textContent.includes('待播')).toBe(false)
+    } finally { }
+  })
+
+  it('详情层渲染类别分组条目，可切文字版', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 点期次标题进详情
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
+      act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 类别小节 + 条目（meta fixture）
+      expect(container.textContent).toContain('热点（2）')
+      expect(container.textContent).toContain('1. 政策发布会召开')
+      expect(container.textContent).toContain('新华社 · 08:02')
+      // 切文字版：来源行 + 免责尾注结构（文字版渲染同一 meta）
+      const readBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '文字版')
+      expect(readBtn).toBeTruthy()
+      act(() => { readBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('2026-05-30 · 共 7 条')
+      expect(container.textContent).toContain('—— 新华社 · 08:02')
+      // 返回条目视图
+      const backBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '◀ 条目视图')
+      act(() => { backBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(container.textContent).toContain('▶ 播放整期')
+    } finally { }
+  })
+
+  it('定时编辑器：班次行/默认类别/同步状态渲染，保存触发 POST', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 班次行 + 勾选 + 范围摘要 + 同步状态
+      expect(container.textContent).toContain('收集后立即播放')
+      expect(container.textContent).toContain('已同步 · 1 班次')
+      expect(container.querySelector('input[type="time"]')).toBeTruthy()
+      // 默认类别 chips 全部渲染（热点在第一）
+      const chips = [...container.querySelectorAll('.dsh-music-subtab')].map((b) => b.textContent)
+      expect(chips.indexOf('热点')).toBeLessThan(chips.indexOf('国内'))
+      // 保存 → POST body 携带班次
+      const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '保存')
+      act(() => { saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(newsScheduleServer.shifts.length).toBe(1)
+      expect(newsScheduleServer.shifts[0].time).toBe('08:00')
+    } finally { }
   })
 })

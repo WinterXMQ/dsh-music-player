@@ -335,6 +335,14 @@ DSH 的 schedule 是 **agent 侧工具**，面板（客户端半体）没有直�
 
 ## 10. client.js 实现落点（备查）
 
+> **实现记录（已完成）**：与本文档的一处重要偏差——新闻播放**没有镜像讲书管线**，
+> 而是把期次包装成「虚拟书」（`bookById` 扩展：id 以 `news-` 开头时从期次列表解析，
+> url 指向 `/dsh-music/news/<id>`）直接接入既有讲书播放管线。播放/字幕/进度/预加载/
+> 续播/声音切换/ended 自动下一块**零复制继承**；📖 目录复用 `BookTocPanel`
+> （sections=类别）、⏮⏭ 复用 `stepBook`（即上/下一类）、名称行 `- 当前类别` 复用
+> `currentSection`。`currentId` 因此为 `book:news-…` 而非本文早先设想的 `news:…`，
+> 对外行为与设计一致。NewsPane 四层导航按本文实现。
+
 | 落点 | 内容 |
 |---|---|
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
