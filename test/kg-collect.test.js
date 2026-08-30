@@ -88,6 +88,9 @@ function boot() {
 
 let booted
 beforeEach(() => {
+  // 生产端 12h 主动续命处于【临时观察·屏蔽】状态（默认关），本文件测的就是
+  // 续命/被动补救路径：显式开回来，逻辑本身保持有测试看护。
+  process.env.DSH_KG_PROACTIVE_REFRESH = 'on'
   booted = boot()
   writeFileSync(booted.cookieFile, JSON.stringify({
     session: {
@@ -111,6 +114,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   vi.clearAllMocks()
+  delete process.env.DSH_KG_PROACTIVE_REFRESH
   if (booted) booted.cleanup()
 })
 
@@ -330,6 +334,116 @@ describe('酷狗主动续命：token 陈旧时提前静默刷新（>12h）', () 
     const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
     expect(saved.loggedIn).toBe(false)
     expect(saved.session.dfid).toBe('DFID') // 指纹仍保留
+  })
+})
+
+describe('12h 主动续命屏蔽开关（临时观察期，默认关）', () => {
+  it('未设 DSH_KG_PROACTIVE_REFRESH → savedAt 陈旧也不主动刷新，业务请求照常放行', async () => {
+    delete process.env.DSH_KG_PROACTIVE_REFRESH // 覆盖 beforeEach 的 on：模拟生产屏蔽态
+    writeFileSync(booted.cookieFile, JSON.stringify({
+      session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
+      loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000,
+    }))
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
+    const res = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    expect(res.status).toBe(200)
+    expect(KG.refreshSession).not.toHaveBeenCalled() // 屏蔽中：不发主动续命
+    expect(KG.getMyPlaylists).toHaveBeenCalledTimes(1) // token 照常透传给业务请求
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.session.token).toBe('oldtok') // 未换新、未落盘
+  })
+})
+
+describe('酷狗主动续命在途去重：并发请求共享一次刷新（防旧 token 二连发被误判已死）', () => {
+  const seedStale = () => writeFileSync(booted.cookieFile, JSON.stringify({
+    session: { guid: 'g', mid: '290402895447160996760242034854185275797', dfid: 'DFID', token: 'oldtok', userid: '1785839222', vip_type: '', vip_token: '' },
+    loggedIn: true, savedAt: Date.now() - 13 * 60 * 60 * 1000, // >12h TTL：后续请求都会通过「该刷新」检查
+  }))
+  // 可控刷新桩：started 在刷新真正发出时兑现（保证后续请求命中「在途」窗口），resolve/reject 手动放行
+  const stallRefresh = () => {
+    let settle, signalStarted
+    const started = new Promise((r) => { signalStarted = r })
+    vi.mocked(KG.refreshSession).mockImplementation(() => new Promise((resolve, reject) => { settle = { resolve, reject }; signalStarted() }))
+    return { started, resolve: (v) => settle.resolve(v), reject: (e) => settle.reject(e) }
+  }
+
+  it('REGRESSION: 刷新在途时第二请求到达 → 共享同一刷新，login_by_token 只发一次', async () => {
+    seedStale()
+    const gate = stallRefresh()
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
+    const p1 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), makeRes())
+    await gate.started // 第一个请求已进入挂起的刷新
+    const p2 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), makeRes())
+    await new Promise((r) => setTimeout(r, 10)) // 给第二请求时间走到续命检查点
+    expect(KG.refreshSession).toHaveBeenCalledTimes(1) // 命中在途共享，未二次发起
+    gate.resolve({ token: 'newtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' })
+    await Promise.all([p1, p2])
+    expect(KG.refreshSession).toHaveBeenCalledTimes(1) // 全程仍只有一次真实刷新
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(true)
+    expect(saved.session.token).toBe('newtok')
+  })
+
+  it('在途刷新被判死（20018）→ 两个调用方共享同一失败，会话只清一次', async () => {
+    seedStale()
+    const gate = stallRefresh()
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
+    const res1 = makeRes(); const res2 = makeRes()
+    const p1 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res1)
+    await gate.started
+    const p2 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res2)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(KG.refreshSession).toHaveBeenCalledTimes(1)
+    gate.reject(new Error('刷新登录态失败：登录态与设备不匹配（20018）'))
+    await Promise.all([p1, p2])
+    for (const res of [res1, res2]) {
+      expect(res.status).toBe(502)
+      expect(JSON.parse(res.body).kgLoginDead).toBe(true)
+    }
+    expect(KG.getMyPlaylists).not.toHaveBeenCalled() // 两个调用方都没再发业务请求
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.loggedIn).toBe(false)
+  })
+
+  it('刷新挂起期间发生重扫登录 → 旧 token 的刷新结果作废，不覆盖新会话', async () => {
+    seedStale()
+    const gate = stallRefresh()
+    vi.mocked(KG.getMyPlaylists).mockResolvedValue([])
+    const res = makeRes()
+    const pPlay = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res)
+    await gate.started // 旧 token 的主动续命刷新已挂起
+    // 重扫链路（真实时序）：出码 → 轮询成功换 qr token → 登录后标准作用域刷新
+    vi.mocked(KG.createQRLogin).mockResolvedValue({ key: 'K9', imageDataUrl: '', expiresAt: Date.now() + 60000 })
+    const startRes = makeRes()
+    await booted.handler(makeReq({ method: 'POST', url: '/dsh-music/kg/login/start' }), startRes)
+    const qrToken = 'qrtok' + 'x'.repeat(50)
+    vi.mocked(KG.checkQRLogin).mockResolvedValue({ status: 'success', message: '登录成功', tokenInfo: { token: qrToken, userid: '1785839222', vip_type: '', vip_token: '' } })
+    // login/check 的登录后刷新不再挂起：直接给标准作用域结果（新链路先完成）
+    vi.mocked(KG.refreshSession).mockImplementation(() => Promise.resolve({ token: 'stdtok', userid: '1785839222', vip_type: '', vip_token: '', t1: '' }))
+    const checkRes = makeRes()
+    await booted.handler(makeReq({ url: '/dsh-music/kg/login/check?key=K9' }), checkRes)
+    // 放行迟到的旧 token 刷新结果（此时会话 token 已是 stdtok → 应被作废）
+    gate.resolve({ token: 'STALE' + 'y'.repeat(50) })
+    await pPlay
+    expect(res.status).toBe(200) // 播放面板请求用新会话照常完成
+    expect(KG.getMyPlaylists).toHaveBeenCalledWith(expect.objectContaining({ token: 'stdtok' }))
+    const saved = JSON.parse(readFileSync(booted.cookieFile, 'utf8'))
+    expect(saved.session.token).toBe('stdtok') // 迟到的旧刷新没有覆盖新登录 token
+  })
+})
+
+describe('酷狗 cookie 冷启动在途去重：同一 tick 的并发请求共享首次读取', () => {
+  it('REGRESSION: 启动后同一 tick 的两个请求 → 第二个不再因 kgCookieLoaded 已置位而误报 401', async () => {
+    // beforeEach 刚写好 loggedIn:true 的 cookie 文件，此刻是本次 boot 的首次访问：
+    // 首个请求挂起在「读文件」时，第二个请求必须等同它完成，而不是只看标志位就放行。
+    const res1 = makeRes(); const res2 = makeRes()
+    const p1 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res1)
+    const p2 = booted.handler(makeReq({ url: '/dsh-music/kg/my-playlists' }), res2)
+    await Promise.all([p1, p2])
+    expect(res1.status).toBe(200)
+    expect(res2.status).toBe(200) // 修复前：401「未登录」（kg.loggedIn 尚未赋值）
+    expect(JSON.parse(res2.body).ok).toBe(true)
   })
 })
 
