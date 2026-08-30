@@ -154,13 +154,11 @@
   可传 `force: true` 强制重收）。这同时兜住「连点立即执行」与「手动执行 × 定时触发撞车」
   两个方向的重复；`force: true` 为明确要求的逃生口（事件发酵中要多份快照）。
   同一会话 agent 运行天然串行，无并发写竞态；每任务 7 期滚动窗口是最后防线。
-- **执行中状态上报（防连点的第一道闸）**：收集阶段发生在 agent 循环内（`news_broadcast`
-  调用前），插件看不见，故由 agent 主动上报——系统提示词约定：开始收集时先调
-  `news_schedule { action:'begin', shiftId }`，Host 记录当前运行 `{ shiftId, startedAt, scope }`；
-  完成时由 `news_broadcast` / `reportFailure` 自然清除运行态。运行态带 TTL（10 分钟）懒过期
-  （agent 崩溃/漏报时自动复位）；`begin` 为尽力而为——漏报只是面板不显示执行中，功能无损。
-  面板经 `GET /dsh-music/news/runstate` 轻量轮询呈现（班次行 ▶ → ⟳ 收集中… 禁点、
-  定时状态行显示「12:30 班次收集中…」），与冷却窗（挡"刚做完又来"）前后互补。
+- **执行中状态上报（Host 统一设置）**：执行入口 `runCollection` 新建执行会话时由 Host 直接
+  记录当前运行 `{ shiftId, sessionId, startedAt, scope }`（不再由 agent `begin` 上报）；完成时
+  由 `news_broadcast` / `reportFailure` 自然清除。运行态带 TTL（10 分钟）懒过期（执行会话
+  异常/漏报时自动复位）。面板经 `GET /dsh-music/news/runstate` 轻量轮询呈现（班次行 ▶ →
+  ⟳ 收集中… 禁点、定时状态行显示「12:30 班次收集中…」），与冷却窗（挡"刚做完又来"）前后互补。
 - `music_play` 的 pause/resume/stop/next/prev 是通用传输控制（next/prev 在讲书即跳章），新闻模式**免费继承**，不改 `music_play`。
 - 系统提示词新增一节（order 116 旁）：说明新闻播报的使用方式——先按类别用 `web_search`
   多查询（带当天日期锚定）、跨源去重、只保留可确认时效的条目、每条写 ≤ 80 字口播摘要并标注来源，
@@ -288,32 +286,29 @@
 
 ### 7.5 定时管理
 
-- **两个配置入口都支持指定范围**：**对话**直接说（「每天早 8 点播 AI 新闻」→ agent 直接建
-  schedule）；**面板**在定时规则编辑器按班次配置（预设类别 + 自定义主题，见 UI 文档 §4）。
-  两条路径的终点一致：**范围信息显式写进 schedule 的提醒内容**，到点驱动 agent 时严格按
-  范围搜索与提交。系统提示词要求：创建新闻定时任务时必须把用户指定的范围（类别/主题/
-  是否播放/条数）显式写入提醒内容，不接受模糊表述。
-- 面板保存的是插件侧「定时偏好」（prefs 持久化，含版本号，含 defaultScope 与班次级
-  scope 覆盖）；由插件的系统提示词 section 动态携带该偏好。
-- **自动同步（已实现）**：面板「同步到定时任务」按钮 → `POST /dsh-music/news/schedule/sync`
-  → Host 把同步指令经 `agent.followup()` **直接注入当前活跃会话**（镜像 harness schedule
-  插件投递提醒的官方模式），agent 自动按偏好创建/更新/删除定时任务并 `markSynced` 回写；
-  agents 服务缺失时回退「复制指令」。班次「▶ 立即执行」同理经
-  `POST /dsh-music/news/run-now` 自动触发。
-- `schedule_list` / `schedule_delete` 管理（对 agent 说「取消我的新闻定时」）。
-- **归属会话语义（重要）**：定时任务与收集轮次都发生在**创建/同步它的那个会话**里
-  （schedule/change 事件与 ScheduleRuntime 均归属该会话的根 agent），既不是自动新建的
-  专用会话，也不跟随用户当前打开的会话——切到别的会话聊天，收集照常在归属会话发生。
-  **已实现（M4 演进）：同步时插件自动创建/复用专用「新闻简报」会话**（`ctx.agents.create`，
-  模型取面板「新闻会话模型」选择器或当前活跃会话；`newsSessionId` 持久化复用；创建失败
-  优雅回退当前活跃会话），定时任务与每轮收集都归属该专用会话，收集历史与主工作会话隔离，
-  会话常驻即定时常驻。跨会话不可见。
-  **关键：创建时必须在 `setup` 里 mount 默认 standing preset**（`agentPresets.mount(agentCtx)`，
-  `meta.agentPreset` 记录 resolved id）——`web_search`/`web_fetch` 等工具是随 preset 按会话
-  装配的，不 mount 的裸会话只有插件全局注册的 `music_play`/`news_broadcast`/`news_schedule`，
-  会因缺 `web_search` 而无法收集（实测踩坑）。
-- 提醒内容（content）写明播报流程（搜索类别、条数、班次标题、是否 `autoplay:false`、
-  时段守卫），到点注入会话并驱动 agent 执行。
+### 7.5 定时管理（Host 自维护）
+
+- **定时器由插件在 DSH 主机进程内自维护**（`rebuildTimer`：读 `schedulePrefs.shifts`，
+  Node `setInterval` 每 30s 检查，到点触发 `runCollection`），**完全脱离会话存活**——不再
+  依赖 DSH 会话级 schedule，会话销毁不影响每天到点触发；宿主重启后按持久化偏好自动重建。
+  **保存即生效**，无需 agent 创建/同步 DSH 定时任务。
+- **配置入口**：面板「⏰ 每日定时」规则编辑器按班次配置（预设类别 chips + 自定义主题 +
+  「收集后立即播放」勾选 + 新闻会话模型，见 UI 文档 §4）；也可对 agent 说「每天早 8 点播
+  AI 新闻」让其引导配置（范围信息存进 `schedulePrefs`，由面板保存后生效）。
+- **一次执行 = 一个执行会话**：每次执行（定时到点 / 面板「▶ 立即执行」`run-now`）都经统一
+  入口 `runCollection` **新建一个独立「执行会话」**（`ctx.agents.create`，模型取面板「新闻
+  会话模型」选择器或当前活跃会话），上下文干净聚焦、互不干扰，不再有常驻复用会话。
+  **会话命名 = 创建时间 + 任务类别**：`runCollection` 计算 `MM-DD HH:mm 类别`，创建成功后经
+  `ctx.sessionTitle.rename(session, name)` 显式命名（如 `05-30 08:00 科技 + 主题:AI`）。
+  ⚠ 不能用"首条消息前缀"自动命名——注入的 followup 是 `plugin` 来源，不满足 `session-title`
+  的 `user` 资格，无法自动生成标题（实测踩坑），必须显式 `rename`。
+- **结果与会话一一对应**：`news_broadcast` 上报时把当前执行会话 id 写入期次（`sessionId`），
+  失败记录同样绑定；**删除某期新闻时联动销毁它对应的执行会话**（`execSessions` 表持有
+  `AgentHandle`，DELETE 时 `dispose` 并清映射）。
+  **关键：创建执行会话时必须在 `setup` 里 mount 默认 standing preset**
+  （`agentPresets.mount(agentCtx)`，`meta.agentPreset` 记录 resolved id）——`web_search`/
+  `web_fetch` 等工具是随 preset 按会话装配的，不 mount 的裸会话只有插件全局注册的
+  `music_play`/`news_broadcast`/`news_schedule`，会因缺 `web_search` 而无法收集（实测踩坑）。
 
 ## 8. 数据来源与抓取机制
 

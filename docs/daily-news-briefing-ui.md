@@ -154,11 +154,10 @@
 │                                              │
 │  [保存]                                      │
 │                                              │
-│  ⓘ 保存后需「同步」到 DSH 定时任务才会生效：        │
-│    对 agent 说「同步新闻定时」即可，agent 会按此     │
-│    配置创建/更新/删除定时任务。建议在专用「新闻     │
-│    简报」会话里同步（隔离收集历史）。               │
-│  同步状态：未同步（配置已修改）                   │   ← 见下方说明
+│  ⓘ 定时由插件在后台自维护，保存即生效（无需同步）：  │
+│    每次到点/手动执行都会新建一个执行会话收集并绑定  │
+│    结果；删除某期新闻会连同删除它对应的执行会话。    │
+│  已配置班次：N 个                               │   ← 见下方说明
 └──────────────────────────────────────────────┘
 ```
 
@@ -188,30 +187,27 @@
   - **继承与重置**：未自定义的班次继承「默认类别」；自定义后覆盖并高亮「已自定义」，
     「重置为默认」恢复继承。
 - **默认类别行**：全局兜底范围（chips + 自定义主题），仅被未自定义的班次继承。
-- **保存**：写入 Host 端定时偏好（`POST /dsh-music/news/schedule`，持久化在 prefs）。
-  保存成功 toast「已保存」。
-- **同步状态行**：三态——`未设置` / `已同步 · N 班次` / `有未同步的修改`。
-  v1 通过对比「偏好版本号」与「最近一次同步记录的版本号」计算（本地面板自持状态，
-  不校验 DSH schedule 实际存在与否）；点「同步状态」弹出与 §4.2 相同的同步指引。
-- **总开关关闭**：保留配置、摘要显示「已停用」；同步后 agent 删除全部新闻定时任务。
+- **保存**：写入 Host 端定时偏好（`POST /dsh-music/news/schedule`，持久化在 prefs），
+  Host 据此重建自维护定时器。保存成功 toast「已保存」。
+- **班次数**：编辑器底部与状态行展示「N 个班次 / N 班次」；无同步语义（Host 自维护）。
+- **总开关关闭**：保留配置、摘要显示「已停用」；Host 定时器停止触发。
 
-### 4.2 生效通路（面板 → agent → DSH schedule）
+### 4.2 生效通路（面板保存 → Host 定时器 → 每次执行新建执行会话）
 
-**自动同步（已实现，为默认路径）**：面板「同步到定时任务」按钮调用
-`POST /dsh-music/news/schedule/sync`，Host 端**先自动创建/复用专用「新闻简报」会话**
-（`ensureNewsSession`：`ctx.agents.create`，模型取面板「新闻会话模型」选择器或当前活跃
-会话；`newsSessionId` 持久化复用），再把同步指令作为 user 消息通过 `agent.followup()`
-**直接注入该专用会话**（镜像 harness schedule 插件投递提醒的官方模式：同构 user 消息 +
-followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`schedule_delete` 并
-`markSynced` 回写，**用户全程无需打字、无需手动开会话**。
-班次行「▶ 立即执行」同理走 `POST /dsh-music/news/run-now` 自动触发并注入同一专用会话。
-专用会话不可用（无 agents 服务/创建失败）时优雅回退：优先「正在运行」的 root agent，
-否则注册序最后一个，再不行回退「复制指令」。
+**保存即生效（已重构，为默认路径）**：面板「保存」写入定时偏好
+（`POST /dsh-music/news/schedule`），Host 端据此**重建自维护定时器**（`rebuildTimer`：
+读 `schedulePrefs.shifts`，Node `setInterval` 每 30s 检查，到点触发 `runCollection`）——
+无需 agent 创建/同步 DSH 定时任务、无需手动开会话。
+每次执行（定时到点 / 面板「▶ 立即执行」`POST /dsh-music/news/run-now`）都经统一入口
+`runCollection` **新建一个「执行会话」**（`ctx.agents.create`，模型取「新闻会话模型」
+选择器或当前活跃会话，`setup` 里 mount 默认 preset 以装配 `web_search` 等），再把收集
+指令作为 user 消息通过 `agent.followup()` 注入该执行会话。结果（期次/失败）绑定该
+执行会话 id；**删除某期新闻时联动销毁它对应的执行会话**。
+agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板提示）。
 
-> 为什么不直写 `schedule/change` 事件：那需要依赖 `@deepseek-ai/dsh-schedule` 的内部
-> 记录构造器与版本化格式（harness 升级即破坏），且绕过 agent 的语义层。`followup`
-> 注入是 harness 插件的公开同款模式，零内部格式耦合，agent 仍负责锚点/时区/去重。
-> 旧的「复制指令」路径保留为无 agents 服务时的降级方案。
+> 为什么不再用 DSH 会话级 schedule：schedule 是 session-local 的，依赖承载会话存活，
+> 与「每任务新建会话 + 删新闻连带删会话」冲突。改为 Host 进程自维护定时器（宿主常驻、
+> Node `setInterval` 可靠），完全脱离会话存活，会话销毁不影响每天到点触发。
 
 ## 5. 播放条新闻模式
 
@@ -285,14 +281,12 @@ followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`sch
 **流 B′ · 面板配置定时（与流 B 的衔接）**：
 ```
 第一层点「⏰ 每日定时 ›」→ 定时规则编辑器：加/删班次、勾选「收集后立即播放」（默认勾选）、点「保存」
- → 偏好写入 Host；同步状态行变「有未同步的修改」
- → 用户对 agent 说「同步新闻定时」（或点 ⇱ 复制指令后粘贴）
- → agent 按偏好 schedule_create / schedule_delete（不勾选的班次提醒内容注明静默收集），回报结果并回写同步版本号
- → 状态行翻「已同步 · N 班次」；此后每个班次到点走流 B
+ → 偏好写入 Host；Host 据此刻重建自维护定时器（保存即生效，无需同步）
+ → 此后每个班次到点由 Host 定时器触发，新建执行会话走流 B
 ```
-注意：同步动作会自动创建/复用**专用「新闻简报」会话**，定时任务与每轮收集都归属并发生
-在该会话里（DSH schedule 会话级生效，见功能设计 §7.5），收集历史不污染主工作会话，
-用户无需手动开会话。
+注意：定时器由插件在 DSH 主机进程内自维护（读已保存的班次偏好，每 30s 检查、到点触发），
+完全脱离会话存活——每次执行新建一个独立「执行会话」收集并绑定结果，会话销毁不影响每天
+到点触发；删除某期新闻会连同删除它对应的执行会话（见功能设计 §7.5）。
 
 **流 C · 错过/回看（收集好的数据列表）**：打开面板 → 新闻播报页签 → 列表里「待播」徽标的期次
 （定时没听到 / 静默收集的都在这）→ 点行进详情 → 点「▶ 播放整期」，或点类别 ▶ 播某类，
@@ -302,12 +296,11 @@ followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`sch
 
 **流 E · 定时任务手动立即触发**：
 ```
-定时规则编辑器里某班次点 [▶ 立即执行]
- → 弹确认气泡，一键复制该班次的精确执行指令（含类别与是否立即播放）
- → 用户粘贴发送给 agent → agent 立即按该班次配置跑一轮（收集 + 按勾选决定是否播放）
+定时规则编辑器里某班次点 [▶ 立即执行] → POST /dsh-music/news/run-now
+ → Host 走统一入口 runCollection：新建执行会话并注入该班次收集指令（不等时刻）
  → 期次照常入列表；若勾选播放则同流 A 开播
 ```
-与定时触发的唯一差别是不等时刻、由用户手动拉起；配置不需先「保存/同步」也可立即执行
+与定时触发的唯一差别是不等时刻、由用户手动拉起；配置不需先「保存」也可立即执行
 （按编辑器当前未保存的值执行）。
 
 ## 8. 状态与反馈汇总
@@ -320,7 +313,7 @@ followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`sch
 | 待播 | 期次列表行 | 「待播」小徽标（已收集未播放：定时错过/静默收集），开播后消失 |
 | 班次执行中 | 定时状态行 + 编辑器班次行 | `⟳ 收集中…`（▶ 按钮禁点，TTL 10 分钟自动复位）；完成后出期/报失败 |
 | 班次收集失败 | 定时状态行下方 | 「⚠ 今天 12:30 班次收集失败 · \<错误摘要\> ▶ 补收」/「⚠ 12:30 收集无结果」——原因透传工具错误码与消息（不做诊断），附通用排查指引；最近 10 条，agent 经 `news_schedule` `reportFailure` 回写 |
-| 定时偏好已改未同步 | 定时状态行 / 编辑器同步状态行 | 「有未同步的修改」；已同步显示「已同步 · N 班次」 |
+| 班次数 | 定时状态行 / 编辑器 | 「N 班次 / N 个班次」；无同步语义（Host 自维护） |
 | 正在播条目 | 详情列表 + 目录弹层 | 高亮（同歌单正在播样式） |
 | 空态 | 新闻页签 | 引导文案（见 §3.1） |
 
@@ -343,9 +336,9 @@ followup 唤醒）——agent 被唤醒后自动按偏好 `schedule_create`/`sch
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
 | store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, model:{provider,model}?, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`，`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
-| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，prefs 持久化，含 `prefVersion`）；`POST /dsh-music/news/schedule/synced`（agent 回写同步版本号，`news_schedule` 工具内部调用）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`ensureNewsSession()`（同步时自动创建/复用专用「新闻简报」会话，`newsSessionId` 持久化复用） |
-| 提示词 | news 系统提示词 section 动态携带定时偏好 + 同步状态（每次请求重渲染） |
-| 工具 | `news_broadcast` 之外新增轻量 `news_schedule`（action: get / begin / markSynced / reportFailure），供 agent 上报开始收集、查询偏好、回报同步完成与上报收集失败 |
+| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`（Host 端：每次执行新建执行会话、统一入口、自维护定时器） |
+| 提示词 | news 系统提示词 section 说明收集流程与失败处理；定时为 Host 自维护，引导用户到面板配置 |
+| 工具 | `news_broadcast` 之外保留轻量 `news_schedule`（action: get / reportFailure），供执行会话查询偏好与上报收集失败；不再有 begin / markSynced / 同步语义 |
 | intent 分支 | `intent.kind === 'news'` → `pendingId = 'news:'+id`，走 book 同构的加载/播放管线（换 URL 前缀 `/dsh-music/news/`） |
 | 播放条 | `isNews` 判定 + 报纸图标 + 控件映射表差异点；`VoicePicker` 复用 |
 | prefs | 播放恢复结构里 news 与 book 同构（期次 id + 块号 + 字符偏移） |

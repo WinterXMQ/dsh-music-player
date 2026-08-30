@@ -8506,9 +8506,9 @@ describe('news pane（新闻播报页签）', () => {
       expect(tab).toBeTruthy()
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 状态行：⏰ 每日定时 + 同步状态
+      // 状态行：⏰ 每日定时 + 班次数（Host 自维护，无同步状态）
       expect(container.textContent).toContain('⏰ 每日定时')
-      expect(container.textContent).toContain('已同步 · 1 班次')
+      expect(container.textContent).toContain('1 班次')
       // 期次行：标题 + 待播徽标 + 类别 chips
       expect(container.textContent).toContain('早间新闻播报')
       expect(container.textContent).toContain('待播')
@@ -8571,9 +8571,9 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 班次行 + 勾选 + 范围摘要 + 同步状态
+      // 班次行 + 勾选 + 范围摘要 + 班次数（Host 自维护，无同步状态）
       expect(container.textContent).toContain('收集后立即播放')
-      expect(container.textContent).toContain('已同步 · 1 班次')
+      expect(container.textContent).toContain('1 个班次')
       expect(container.querySelector('input[type="time"]')).toBeTruthy()
       // 默认类别 chips 全部渲染（热点在第一）
       const chips = [...container.querySelectorAll('.dsh-music-subtab')].map((b) => b.textContent)
