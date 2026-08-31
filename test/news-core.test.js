@@ -78,14 +78,24 @@ describe('renderScript + splitScriptChunks', () => {
   const input = sanitizeEditionInput(VALID_BODY).value
   const { text, itemOffsets, categoryOffsets } = renderScript(input)
 
-  it('开场含标题与日期与类别预告', () => {
-    expect(text.startsWith('您好，这里是早间新闻播报，2026年5月30日。今天的主要内容有：热点、AI。')).toBe(true)
+  it('开场含标题与日期（不再重复罗列类别）', () => {
+    expect(text.startsWith('您好，这里是早间新闻播报，2026年5月30日。')).toBe(true)
+    expect(text).not.toContain('今天的主要内容有')
   })
-  it('条目句含序数、标题、摘要、来源', () => {
+  it('条目句含序数、标题、摘要；不含来源尾缀', () => {
     expect(text).toContain('第一条，某重大政策发布。今早国新办举行发布会')
-    expect(text).toContain('以上消息来自新华社。')
+    expect(text).not.toContain('以上消息来自')
     expect(text).toContain('首先来听热点。')
     expect(text).toContain('接下来听AI。')
+  })
+  it('摘要自带句号时不会出现重复句号', () => {
+    // VALID_BODY 的 summary 不带句号；构造一个带句号的验证不出现「。。」
+    const r = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '事件要点。事件影响。' }] }],
+    }).value
+    const { text: t2 } = renderScript(r)
+    expect(t2).toContain('第一条，t。事件要点。事件影响。')
+    expect(t2).not.toContain('。。')
   })
   it('条目与类别偏移指向正确文本起点', () => {
     expect(text.slice(itemOffsets[0], itemOffsets[0] + 4)).toBe('第一条，')
