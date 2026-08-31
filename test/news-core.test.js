@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   PRESET_CATEGORIES, LIMITS, cnOrdinal, formatDateCn, sanitizeEditionInput,
-  renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown,
+  renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown, partitionStaleNews,
   summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
   sanitizeModelSelection, runStateAlive,
 } from '../lib/news-core.js'
@@ -66,7 +66,7 @@ describe('sanitizeEditionInput', () => {
     expect(r.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
   })
   it('病态超长 summary 才截断且保留省略号（正常长度内容不截断）', () => {
-    // 正常长度（< summaryChars，即 150~280 字内）不被截断——不出现省略号。
+    // 正常长度（< summaryChars，即 200~220 字内）不被截断——不出现省略号。
     const normal = sanitizeEditionInput({
       categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(20) }] }], // 160 字
     })
@@ -77,6 +77,16 @@ describe('sanitizeEditionInput', () => {
     })
     expect(r.value.categories[0].items[0].summary.length).toBe(LIMITS.summaryChars)
     expect(r.value.categories[0].items[0].summary.endsWith('…')).toBe(true)
+  })
+  it('超长摘要兜底在句末标点处断句（播报不断在半截）', () => {
+    // 每句 12 字 ×30 = 360 字，超出 220：应在前 220 字内最后一个「。」处收句（12×18=216 字）
+    const r = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '第一句讲要点，内容充实。'.repeat(30) }] }],
+    })
+    const s = r.value.categories[0].items[0].summary
+    expect(s.length).toBe(216)
+    expect(s.endsWith('。')).toBe(true)
+    expect(s.endsWith('…')).toBe(false)
   })
 })
 
@@ -129,6 +139,37 @@ describe('renderScript + splitScriptChunks', () => {
     const chunks = splitScriptChunks('长'.repeat(450) + '。')
     expect(chunks.join('').length).toBe(451)
     expect(chunks.every((c) => c.length <= 200)).toBe(true)
+  })
+})
+
+describe('单类别期次（不播类别引导语）', () => {
+  const single = sanitizeEditionInput({
+    title: 'AI 新闻简报', date: '2026-08-31',
+    opening: '各位听众早上好，今天是2026年8月31日，星期一。以下是今日国内要闻。',
+    categories: [{ name: '国内', items: [
+      { title: '政策发布', summary: '国新办介绍相关政策要点。', source: '新华社' },
+      { title: '强降雨持续', summary: '多地启动应急响应。', source: '央视新闻' },
+    ] }],
+  }).value
+  const { text, categoryOffsets } = renderScript(single)
+  const e = buildEdition(single, { id: 'n9', createdAt: 1000 })
+
+  it('开场后直接进第一条新闻，不再播「首先来听X」', () => {
+    expect(text).toContain('以下是今日国内要闻。第一条，政策发布。')
+    expect(text).not.toContain('首先来听')
+    expect(text).not.toContain('接下来听')
+  })
+  it('类别偏移指向首条条目起点（目录跳转落到第一条新闻）', () => {
+    expect(categoryOffsets.length).toBe(1)
+    expect(text.slice(categoryOffsets[0], categoryOffsets[0] + 4)).toBe('第一条，')
+  })
+  it('categoryChunk 与 meta sections 对齐，跳转块即首条新闻；开场白独占一块', () => {
+    expect(e.categoryChunk.length).toBe(1)
+    const meta = metaForEdition(e)
+    expect(meta.sections[0].heading).toBe('国内')
+    expect(meta.sections[0].fromChunk).toBe(e.categoryChunk[0])
+    expect(e.chunks[e.categoryChunk[0]].startsWith('第一条，')).toBe(true)
+    expect(e.chunks[0]).toBe(single.opening)
   })
 })
 
@@ -197,6 +238,31 @@ describe('findInCooldown（冷却窗）', () => {
   it('取的是该班次最新一期判断', () => {
     const older = { id: 'n0', originShiftId: 's1', createdAt: 100, categories: [] }
     expect(findInCooldown([older, e], { originShiftId: 's1', now: 1200 })).toBe(e)
+  })
+})
+
+describe('partitionStaleNews（每日 03:00 过期清理）', () => {
+  const START = 1000 // 「今日 00:00」
+  const old1 = { id: 'old1', createdAt: 500, sessionId: 'news-exec-a' }
+  const old2 = { id: 'old2', createdAt: 999, sessionId: 'news-exec-b' }
+  const fresh = { id: 'fresh', createdAt: 1000, sessionId: 'news-exec-c' } // 恰好今天 00:00 → 保留
+  const newer = { id: 'newer', createdAt: 5000, sessionId: null }
+  it('按 createdAt 分离今天之前的期次，边界值（=00:00）保留', () => {
+    const { staleEditions } = partitionStaleNews([old1, old2, fresh, newer], [], START)
+    expect(staleEditions.map((e) => e.id)).toEqual(['old1', 'old2'])
+  })
+  it('失败记录按 ts 分离；会话 id 去重汇总（期次 + 失败共用会话只出现一次）', () => {
+    const failures = [
+      { ts: 400, kind: 'empty', sessionId: 'news-exec-a' }, // 与 old1 同会话 → 去重
+      { ts: 1200, kind: 'error' }, // 今天 → 保留
+    ]
+    const { staleFailures, sessionIds } = partitionStaleNews([old1, old2, fresh], failures, START)
+    expect(staleFailures.length).toBe(1)
+    expect(sessionIds).toEqual(['news-exec-a', 'news-exec-b'])
+  })
+  it('空输入与无会话字段安全', () => {
+    expect(partitionStaleNews([], [], START)).toEqual({ staleEditions: [], staleFailures: [], sessionIds: [] })
+    expect(partitionStaleNews([{ id: 'x', createdAt: 1 }], [], START).sessionIds).toEqual([])
   })
 })
 

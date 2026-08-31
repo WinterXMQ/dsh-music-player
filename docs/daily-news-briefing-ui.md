@@ -336,7 +336,7 @@ agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板�
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
 | store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, model:{provider,model}?, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`，`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
-| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`（Host 端：每次执行新建执行会话、统一入口、自维护定时器） |
+| Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`POST /dsh-music/news/purge-stale`（每日 03:00 / 启动清理同一入口：删除今天之前的期次与失败记录并归档会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`/`rebuildCleanupTimer()`（Host 端：每次执行新建执行会话并归入「新闻收集」工作区分组、统一入口、自维护定时器与每日清理定时器） |
 | 提示词 | news 系统提示词 section 说明收集流程与失败处理；定时为 Host 自维护，引导用户到面板配置 |
 | 工具 | `news_broadcast` 之外保留轻量 `news_schedule`（action: get / reportFailure），供执行会话查询偏好与上报收集失败；不再有 begin / markSynced / 同步语义 |
 | intent 分支 | `intent.kind === 'news'` → `pendingId = 'news:'+id`，走 book 同构的加载/播放管线（换 URL 前缀 `/dsh-music/news/`） |

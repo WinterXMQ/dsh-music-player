@@ -6,7 +6,7 @@
  * news_broadcast 只做校验/渲染/分块/持久化，懒合成（WAV 块路由）仅在取音频时发生。
  */
 import { describe, it, expect, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, existsSync, statSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -45,7 +45,7 @@ function makeFs(rootDir) {
   }
 }
 
-function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null, workspace = null, home = null } = {}) {
+function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null, workspace = null, workspaceRegistry = null, home = null } = {}) {
   const homeDir = home || mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
   const prevHome = process.env.HOME
   const prevDshHome = process.env.DSH_HOME
@@ -60,12 +60,14 @@ function boot({ agentsService = null, llm = null, agentPresets = null, sessionTi
     tools: { register: (tool) => { tools.push(tool) } },
     systemPrompt: { section: () => {} },
     effect: (fn) => { fn() },
-    // 懒获取服务（与真实宿主一致）：agents / llm / agentPresets / sessionTitle / workspace 仅在传入时才可见。
+    // 懒获取服务（与真实宿主一致）：agents / llm / agentPresets / sessionTitle /
+    // workspaceRegistry 仅在传入时才可见。workspace 为旧服务名兜底（真实宿主为 workspaceRegistry）。
     get: (k) => {
       if (k === 'agents') return agentsService
       if (k === 'llm') return llm
       if (k === 'agentPresets') return agentPresets
       if (k === 'sessionTitle') return sessionTitle
+      if (k === 'workspaceRegistry') return workspaceRegistry || workspace
       if (k === 'workspace') return workspace
       return undefined
     },
@@ -425,7 +427,100 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(text).toContain('先不播放') // autoplay:false → 静默收集
       expect(text).toContain('科技')
       expect(text).toContain('AI')
+      // 注入指令显式携带当前日期与时间：收集 agent 不必先调工具查时间、日期锚定不跑偏
+      expect(text).toMatch(/今天是 \d{4}年\d{1,2}月\d{1,2}日 星期[日一二三四五六]，当前时间 \d{2}:\d{2}/)
     } finally { cleanup() }
+  })
+
+  it('purge-stale：删除今天之前的期次/失败记录并归档关联会话（与每日清理同一入口）', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    let created = []
+    const disposed = []
+    const archived = []
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created.push(opts)
+        return {
+          agent: { id: opts.sessionId, session: {}, followup: () => {} },
+          dispose: async () => { disposed.push(opts.sessionId) },
+        }
+      },
+    })
+    agents.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const workspaceRegistry = { archiveSession: async (sid) => { archived.push(sid) } }
+    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service, workspaceRegistry, home })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [
+            { id: 's1', time: '08:00', autoplay: true, scope: null },
+            { id: 's2', time: '09:00', autoplay: true, scope: null },
+          ],
+        }),
+      }), makeRes())
+      // 两个班次各收集一期
+      const rr1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), rr1)
+      const sid1 = JSON.parse(rr1.body).sessionId
+      const b1 = await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's1' })
+      const rr2 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's2' }) }), rr2)
+      const b2 = await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's2' })
+      // 把第一期改写成「今天之前」的旧期次，并补一条旧失败记录（其会话无本进程句柄 → 走归档兜底）
+      const file = join(home, '.dsh', 'music-player-news.json')
+      const data = JSON.parse(readFileSync(file, 'utf8'))
+      data.editions.find((e) => e.id === b1.editionId).createdAt = Date.now() - 48 * 3600e3
+      data.failures = [
+        { ts: Date.now() - 48 * 3600e3, shiftId: 's1', kind: 'empty', reason: '旧失败', sessionId: 'news-exec-ghost' },
+        { ts: Date.now(), shiftId: 's2', kind: 'empty', reason: '新失败' },
+      ]
+      writeFileSync(file, JSON.stringify(data), 'utf8')
+      const r = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/purge-stale' }), r)
+      expect(JSON.parse(r.body)).toMatchObject({ ok: true, editions: 1, failures: 1, sessions: 2 })
+      // 列表只剩今天这期；旧期次的会话被销毁 + 归档，新会话不动
+      const list = makeRes()
+      await handler(makeReq({ url: '/dsh-music/news' }), list)
+      expect(JSON.parse(list.body).editions.map((e) => e.id)).toEqual([b2.editionId])
+      expect(disposed).toEqual([sid1])
+      expect(archived).toEqual([sid1, 'news-exec-ghost'])
+      expect(JSON.parse(readFileSync(file, 'utf8')).failures.length).toBe(1) // 新失败记录保留
+    } finally { cleanup(); rmSync(home, { recursive: true, force: true }) }
+  })
+
+  it('启动时自动清理非今天的新闻并归档会话（不等 03:00）', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    const now = Date.now()
+    const file = join(home, '.dsh', 'music-player-news.json')
+    mkdirSync(join(home, '.dsh'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      editions: [
+        { id: 'stale', createdAt: now - 48 * 3600e3, chunks: ['x'], sessionId: 'news-exec-old' },
+        { id: 'fresh', createdAt: now - 3600e3, chunks: ['y'], sessionId: 'news-exec-fresh' },
+      ],
+      schedulePrefs: {},
+      runState: null,
+      failures: [{ ts: now - 48 * 3600e3, shiftId: 's1', kind: 'empty', reason: '旧失败', sessionId: 'news-exec-ghost' }],
+    }), 'utf8')
+    const agents = makeAgents()
+    const archived = []
+    const workspaceRegistry = { archiveSession: async (sid) => { archived.push(sid) } }
+    const b = boot({ agentsService: agents.service, workspaceRegistry, home })
+    try {
+      // 启动清理是 fire-and-forget：轮询等文件收敛（stale 期次与旧失败记录被移除）
+      const deadline = Date.now() + 2000
+      let data = JSON.parse(readFileSync(file, 'utf8'))
+      while (Date.now() < deadline && data.editions.some((e) => e.id === 'stale')) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+        data = JSON.parse(readFileSync(file, 'utf8'))
+      }
+      expect(data.editions.map((e) => e.id)).toEqual(['fresh'])
+      expect(data.failures.length).toBe(0)
+      expect(archived).toEqual(expect.arrayContaining(['news-exec-old', 'news-exec-ghost']))
+    } finally { b.cleanup(); rmSync(home, { recursive: true, force: true }) }
   })
 
   it('run-now 未知班次返回 404，不创建执行会话', async () => {
@@ -501,6 +596,46 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
     } finally { cleanup() }
   })
 
+  it('执行会话归入「新闻收集」命名工作区：专属 cwd + registry.create + attachSession', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
+    let created = []
+    const agents = makeAgents({
+      agentsCreate: async (opts) => {
+        created.push(opts)
+        return { agent: { id: opts.sessionId, session: {}, followup: () => {} } }
+      },
+    })
+    agents.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
+    const calls = []
+    const workspaceRegistry = {
+      create: async (path, title) => {
+        calls.push({ op: 'create', path, title })
+        return { attachSession: async (sid) => { calls.push({ op: 'attach', sid }) } }
+      },
+      archiveSession: async () => {},
+    }
+    const { handler, cleanup } = boot({ agentsService: agents.service, workspaceRegistry, home })
+    try {
+      await handler(makeReq({
+        method: 'POST', url: '/dsh-music/news/schedule',
+        body: JSON.stringify({
+          enabled: true, defaultScope: { categories: [], topics: [] },
+          shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }],
+        }),
+      }), makeRes())
+      const rr = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/news/run-now', body: JSON.stringify({ shiftId: 's1' }) }), rr)
+      const sid = JSON.parse(rr.body).sessionId
+      const dir = realpathSync(join(home, '.dsh', 'news'))
+      expect(existsSync(join(home, '.dsh', 'news'))).toBe(true) // 专属目录已创建
+      expect(created.length).toBe(1)
+      // 会话 cwd 指向专属目录：工作区按「header cwd === 工作区路径」校验成员资格
+      expect(created[0].meta.cwd).toBe(dir)
+      expect(calls[0]).toEqual({ op: 'create', path: dir, title: '新闻收集' })
+      expect(calls.some((c) => c.op === 'attach' && c.sid === sid)).toBe(true)
+    } finally { cleanup() }
+  })
+
   it('删除期次联动销毁并归档对应执行会话（dispose + archiveSession）', async () => {
     let created = []
     const disposed = []
@@ -516,8 +651,8 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
     })
     const live = agents.service.get('agent-live')
     live.options = { provider: 'deepseek', model: 'deepseek-chat' }
-    const workspace = { archiveSession: async (sid) => { archived.push(sid) } }
-    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service, workspace })
+    const workspaceRegistry = { archiveSession: async (sid) => { archived.push(sid) } }
+    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service, workspaceRegistry })
     try {
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
@@ -585,8 +720,8 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
       }
     }
     agents2.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
-    const workspace2 = { archiveSession: async (sid) => { archived2.push(sid) } }
-    const b2 = boot({ agentsService: agents2.service, workspace: workspace2, home })
+    const workspaceRegistry2 = { archiveSession: async (sid) => { archived2.push(sid) } }
+    const b2 = boot({ agentsService: agents2.service, workspaceRegistry: workspaceRegistry2, home })
     try {
       const del = makeRes()
       await b2.handler(makeReq({ method: 'DELETE', url: '/dsh-music/news/' + editionId }), del)
