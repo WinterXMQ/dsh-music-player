@@ -65,9 +65,15 @@ describe('sanitizeEditionInput', () => {
     expect(r.ok).toBe(true)
     expect(r.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
   })
-  it('超长 summary 截断且保留省略号', () => {
+  it('病态超长 summary 才截断且保留省略号（正常新闻内容不截断）', () => {
+    // 常规长度（< summaryChars）不被截断——真实新闻内容完整呈现、不出现省略号。
+    const normal = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(50) }] }],
+    })
+    expect(normal.value.categories[0].items[0].summary.endsWith('…')).toBe(false)
+    // 超过安全上限（防御病态输入）才截断并带省略号。
     const r = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '长'.repeat(300) }] }],
+      categories: [{ name: '热点', items: [{ title: 't', summary: '长'.repeat(LIMITS.summaryChars + 50) }] }],
     })
     expect(r.value.categories[0].items[0].summary.length).toBe(LIMITS.summaryChars)
     expect(r.value.categories[0].items[0].summary.endsWith('…')).toBe(true)
@@ -81,6 +87,16 @@ describe('renderScript + splitScriptChunks', () => {
   it('开场含标题与日期（不再重复罗列类别）', () => {
     expect(text.startsWith('您好，这里是早间新闻播报，2026年5月30日。')).toBe(true)
     expect(text).not.toContain('今天的主要内容有')
+  })
+  it('标题已含日期时不重复追加日期', () => {
+    const r = sanitizeEditionInput({
+      title: '国内新闻播报 · 2026年8月31日', date: '2026-08-31',
+      categories: [{ name: '国内', items: [{ title: 't', summary: 's。', source: 'x' }] }],
+    }).value
+    const { text: t2 } = renderScript(r)
+    expect(t2.startsWith('您好，这里是国内新闻播报 · 2026年8月31日。')).toBe(true)
+    // 只出现一次「2026年8月31日」（标题里的一次，开场不再追加）。
+    expect(t2.match(/2026年8月31日/g).length).toBe(1)
   })
   it('条目句含序数、标题、摘要；不含来源尾缀', () => {
     expect(text).toContain('第一条，某重大政策发布。今早国新办举行发布会')
