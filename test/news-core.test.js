@@ -65,10 +65,10 @@ describe('sanitizeEditionInput', () => {
     expect(r.ok).toBe(true)
     expect(r.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
   })
-  it('病态超长 summary 才截断且保留省略号（正常新闻内容不截断）', () => {
-    // 常规长度（< summaryChars）不被截断——真实新闻内容完整呈现、不出现省略号。
+  it('病态超长 summary 才截断且保留省略号（正常长度内容不截断）', () => {
+    // 正常长度（< summaryChars，即 150~280 字内）不被截断——不出现省略号。
     const normal = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(50) }] }],
+      categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(20) }] }], // 160 字
     })
     expect(normal.value.categories[0].items[0].summary.endsWith('…')).toBe(false)
     // 超过安全上限（防御病态输入）才截断并带省略号。
