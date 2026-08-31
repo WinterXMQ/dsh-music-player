@@ -285,14 +285,13 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.prefVersion).toBe(0)
     expect(p.syncedVersion).toBe(-1)
   })
-  it('默认类别白名单过滤', () => {
+  it('defaultScope 已退役：入参中的该字段被丢弃', () => {
     const p = sanitizeSchedulePrefs({
       defaultScope: { categories: ['热点', '不存在', '国内'], topics: ['AI', ''] },
     })
-    expect(p.defaultScope.categories).toEqual(['热点', '国内'])
-    expect(p.defaultScope.topics).toEqual(['AI'])
+    expect(p.defaultScope).toBeUndefined()
   })
-  it('班次时间非法被丢弃、超限截断、scope=null 表示继承默认', () => {
+  it('班次时间非法被丢弃、超限截断、scope=null 兜底为全预设类别', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'a', time: '08:00', autoplay: false, scope: null },
@@ -302,8 +301,18 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.shifts.length).toBe(2)
     expect(p.shifts[0].autoplay).toBe(false)
-    expect(p.shifts[0].scope).toBe(null)
+    expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope.topics.length).toBe(LIMITS.topicsPerShift)
+  })
+  it('空范围兜底为全预设类别；纯主题范围原样保留', () => {
+    const p = sanitizeSchedulePrefs({
+      shifts: [
+        { id: 'a', time: '08:00', scope: { categories: [], topics: [] } },
+        { id: 'b', time: '09:00', scope: { categories: [], topics: ['AI'] } },
+      ],
+    })
+    expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
+    expect(p.shifts[1].scope).toEqual({ categories: [], topics: ['AI'] })
   })
   it('班次数上限 6', () => {
     const shifts = Array.from({ length: 9 }, (_, i) => ({ time: `0${i}:00` }))

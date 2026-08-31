@@ -141,18 +141,13 @@
 │  班次（每天按以下时刻触发；点行展开收集范围）      │
 │  ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐   │
 │    08:00  [✓]收集后立即播放         [▶] [🗑]   │
-│      └ 范围: [热点][国内][国际][科技][财经][体育] │   ← 继承默认（未自定义）
+│      └ 范围: [热点][国内][国际][科技][财经][体育][娱乐] │   ← 显式全选七类
 │    12:30  [ ]收集后立即播放         [▶] [🗑]   │   ← 不勾选 = 静默收集
-│      └ 范围: [科技] 主题: [AI ✕] [重置默认]     │   ← 班次级覆盖：只收集 AI
+│      └ 范围: 主题:AI                           │   ← 纯主题范围：只收集 AI
 │    18:00  [✓]收集后立即播放         [▶] [🗑]   │
-│      └ 范围: [国内][国际] 主题: [美股 ✕]        │
+│      └ 范围: [国内][国际] + 主题:美股              │
 │  └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘   │
-│  [＋ 添加班次]   （新班次继承默认类别，上限 6 个）  │
-│                                              │
-│  默认类别（未被班次覆盖时使用）                  │
-│  [热点] [国内] [国际] [科技] [财经] [体育] ＋自定义 │   ← 热点排第一；chips 多选 + 自定义主题
-│                                              │
-│  [保存]                                      │
+│  [＋ 添加班次]   （新班次默认不选，至少选一项方可保存；上限 6 个）  │
 │                                              │
 │  ⓘ 定时由插件在后台自维护，保存即生效（无需同步）：  │
 │    每次到点/手动执行都会新建一个执行会话收集并绑定  │
@@ -176,19 +171,20 @@
   收集完不播放」* 的精确指令，用户发送给 agent 后立即按规则执行（走 `news_broadcast`）。
   **连点多次无副作用**（按钮仅复制，5 秒内重复点击只 toast 一次）；同一班次冷却窗
   （10 分钟）内重复执行会被工具层跳过并提示，`force` 指令可强制重收（见功能设计 §5.1）。
-- **添加班次**：追加一行默认 `08:00 · 勾选立即播放 · 继承默认类别`；上限 6 个
+- **添加班次**：弹窗新增，默认 `08:00 · 勾选立即播放 · 不选任何类别`；上限 6 个
   （成本与可读性平衡，超出置灰）。
-- **收集范围（班次级，点班次行展开）**：
-  - **预设类别 chips**：热点（排第一，跨领域+热度排序）/ 国内 / 国际 / 科技 / 财经 / 体育 多选；
+- **收集范围（班次级，编辑弹窗内设置）**：
+  - **预设类别 chips**：热点（排第一，跨领域+热度排序）/ 国内 / 国际 / 科技 / 财经 / 体育 / 娱乐 多选；
   - **自定义主题**：自由文本 tag（如 `AI`、`新能源汽车`、`美股`），每班次 ≤ 5 个。
-    主题词双重语义——**搜索关键词**（agent 以「日期 + 主题 + 新闻」组合查询）与
+    **输入即生效**：不必按回车，保存时自动收进主题（回车只是立即转为 chip 的快捷方式）；
+    输入框非空同样满足「范围必填」。主题词双重语义——**搜索关键词**（agent 以「日期 + 主题 + 新闻」组合查询）与
     **期次类别名**（期次里出现以主题命名的类别，来源优先该主题的权威垂直媒体，
     如 AI → 机器之心 / 量子位，见功能设计 §8.3）；
-  - **继承与重置**：未自定义的班次继承「默认类别」；自定义后覆盖并高亮「已自定义」，
-    「重置为默认」恢复继承。
-- **默认类别行**：全局兜底范围（chips + 自定义主题），仅被未自定义的班次继承。
-- **保存**：写入 Host 端定时偏好（`POST /dsh-music/news/schedule`，持久化在 prefs），
-  Host 据此重建自维护定时器。保存成功 toast「已保存」。
+  - **范围必填**：至少选中一个类别或添加一个自定义主题，否则「添加/保存」置灰不可点
+    （不显示提示文案，以按钮态表达）。「全局默认类别」已退役：班次范围不再有
+    「继承默认」语义；旧数据里 scope 为空的班次由 Host 规整为全选六类。
+- **自动保存**：编辑即 500ms 防抖写入 Host 端定时偏好
+  （`POST /dsh-music/news/schedule`，持久化在 prefs），Host 据此重建自维护定时器。
 - **班次数**：编辑器底部与状态行展示「N 个班次 / N 班次」；无同步语义（Host 自维护）。
 - **总开关关闭**：保留配置、摘要显示「已停用」；Host 定时器停止触发。
 
@@ -335,7 +331,7 @@ agents 服务不可用/创建失败时 `runCollection` 返回 fallback（面板�
 |---|---|
 | 页签行 | `tabBtn('news', '新闻播报')` 插到 `tabBtn('book', …)` 之后；`paneStyle('news')` |
 | 新组件 | `NewsPane`（定时状态行 + 期次列表/详情/文字版/定时规则编辑器多层导航）、`NewsTocPanel`（可由 `BookTocPanel` 参数化改造而来） |
-| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, defaultScope:{categories[],topics[]}, model:{provider,model}?, shifts:[{id,time,autoplay,scope?}], prefVersion, syncedVersion }`，班次无 `scope` 即继承 `defaultScope`，`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
+| store | `editions`、`newsView`（'list'\|editionId\|'read'\|'schedule'）、`newsSchedulePrefs`（`{ enabled, model:{provider,model}?, shifts:[{id,time,autoplay,scope:{categories[],topics[]}}], prefVersion, syncedVersion }`，班次 `scope` 必填（至少一个类别或主题；全局 `defaultScope` 已退役，旧数据空范围由 Host 规整为全选六类），`model` 为「新闻会话模型」选择器）、`newsSyncState`、`currentItem` 高亮映射 |
 | Host 路由 | `GET/POST /dsh-music/news/schedule`（定时偏好读写，保存即重建 Host 定时器）；`POST /dsh-music/news/run-now`（立即执行，统一走 `runCollection` 新建执行会话）；`POST /dsh-music/news/purge-stale`（每日 03:00 / 启动清理同一入口：删除今天之前的期次与失败记录并归档会话）；`GET /dsh-music/news/runstate`（当前收集运行态，客户端轻量轮询驱动 `⟳ 收集中…`）；`GET /dsh-music/news/models`（可用 provider/model，供「新闻会话模型」选择器）；`DELETE /dsh-music/news/<id>`（删除期次并联动销毁其执行会话）；`createExecutionSession()`/`runCollection()`/`rebuildTimer()`/`rebuildCleanupTimer()`（Host 端：每次执行新建执行会话并归入「新闻收集」工作区分组、统一入口、自维护定时器与每日清理定时器） |
 | 提示词 | news 系统提示词 section 说明收集流程与失败处理；定时为 Host 自维护，引导用户到面板配置 |
 | 工具 | `news_broadcast` 之外保留轻量 `news_schedule`（action: get / reportFailure），供执行会话查询偏好与上报收集失败；不再有 begin / markSynced / 同步语义 |

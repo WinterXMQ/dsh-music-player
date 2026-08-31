@@ -144,7 +144,8 @@ const newsMetaFixture = {
   itemChunk: [0, 0, 1, 2, 2, 3, 3], categoryChunk: [0, 2, 3],
 }
 const newsScheduleDefault = {
-  enabled: true, defaultScope: { categories: ['热点', '国内', '国际', '科技', '财经', '体育'], topics: [] },
+  enabled: true,
+  // 旧数据兼容用例：scope=null 的存量班次，卡片按全部预设类别兜底展示（defaultScope 已退役，不再出现在数据里）
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
@@ -8582,7 +8583,9 @@ describe('news pane（新闻播报页签）', () => {
       const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
       expect(cards.length).toBe(1)
       expect(cards[0].textContent).toContain('08:00')
-      expect(cards[0].textContent).toContain('默认 · 热点/国内/国际/科技/财经/体育')
+      // 旧 null scope 兜底展示全部预设类别，不再有「默认 · 」前缀（defaultScope 已退役）
+      expect(cards[0].textContent).toContain('热点/国内/国际/科技/财经/体育/娱乐')
+      expect(cards[0].textContent.includes('默认 · ')).toBe(false)
       expect(cards[0].textContent).toContain('立即播放')
       // 添加班次按钮位于班次标题右侧，点击弹出设置弹窗（不是平铺在编辑器里）
       const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
@@ -8597,6 +8600,14 @@ describe('news pane（新闻播报页签）', () => {
       expect(timeInput).toBeTruthy()
       const chipBtns = [...overlay.querySelectorAll('.dsh-music-subtab')]
       expect(chipBtns.map((b) => b.textContent).indexOf('热点')).toBeGreaterThanOrEqual(0)
+      // 范围必填：新班次默认一个类别都不选 → 「添加」禁用（无提示文案，仅按钮置灰）；选一个类别 → 恢复可用
+      expect(chipBtns.every((b) => !b.className.includes('active'))).toBe(true)
+      const okBtn0 = [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加')
+      expect(okBtn0.disabled).toBe(true)
+      expect(overlay.textContent.includes('至少选择一个类别')).toBe(false)
+      act(() => { chipBtns[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
       // 改时刻后确定 → 新增班次（编辑器里的卡片从 1 变 2）
       act(() => {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
@@ -8619,6 +8630,51 @@ describe('news pane（新闻播报页签）', () => {
       expect(newsScheduleServer.shifts.length).toBe(2)
       expect(newsScheduleServer.shifts[0].time).toBe('08:00')
       expect(newsScheduleServer.shifts[1].time).toBe('21:30')
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
+  })
+
+  it('添加班次：自定义主题输入即生效，无需回车（保存时自动收进 topics）', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      expect(overlay).toBeTruthy()
+      // 不选类别、主题输入框为空 → 「添加」禁用
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(true)
+      // 仅输入主题文本（不按回车）→ 「添加」即可点击
+      const topicInput = overlay.querySelector('input[placeholder="如 AI、新能源汽车"]')
+      expect(topicInput).toBeTruthy()
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(topicInput, 'AI')
+        topicInput.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
+      // 直接点添加（不回车）→ 主题收进班次范围：topics=['AI']、categories=[]
+      act(() => { [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(overlay.isConnected).toBe(false)
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) }) // 等防抖自动保存落盘
+      expect(newsScheduleServer.shifts.length).toBe(2)
+      expect(newsScheduleServer.shifts[1].scope.categories).toEqual([])
+      expect(newsScheduleServer.shifts[1].scope.topics).toEqual(['AI'])
     } finally {
       newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
     }

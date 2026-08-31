@@ -350,7 +350,7 @@ describe('news 路由', () => {
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r1)
       const p1 = JSON.parse(r1.body).schedulePrefs
       expect(p1.prefVersion).toBe(1)
-      expect(p1.defaultScope.categories).toEqual(['热点', '国内'])
+      expect(p1.defaultScope).toBeUndefined() // defaultScope 已退役：入参字段被丢弃
       const r2 = makeRes()
       await handler(makeReq({ method: 'POST', url: '/dsh-music/news/schedule', body }), r2)
       expect(JSON.parse(r2.body).schedulePrefs.prefVersion).toBe(1) // 未变化不递增
@@ -414,10 +414,10 @@ describe('run-now（统一执行入口：定时到点 / 手动立即执行共用
       expect(created.length).toBe(1)
       expect(created[0].sessionId.startsWith('news-exec-')).toBe(true)
       expect(data.sessionId).toBe(created[0].sessionId)
-      // 执行会话被显式命名：名称 = 当前时间 + 任务类别（科技 + 主题:AI）
+      // 执行会话被显式命名：名称 = 当前时间 + 任务类别（科技+主题:AI，紧凑格式）
       expect(renamed.length).toBe(1)
       expect(renamed[0].sessionId).toBe(created[0].sessionId)
-      expect(renamed[0].title).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} 科技 \+ 主题:AI$/)
+      expect(renamed[0].title).toMatch(/^\d{2}-\d{2} \d{2}:\d{2} 科技\+主题:AI$/)
       // 注入收集指令（含班次信息，无同步/begin 语义）
       expect(agents.injected.length).toBe(1)
       const text = agents.injected[0].msg.content[0].text
