@@ -303,8 +303,14 @@
   ⚠ 不能用"首条消息前缀"自动命名——注入的 followup 是 `plugin` 来源，不满足 `session-title`
   的 `user` 资格，无法自动生成标题（实测踩坑），必须显式 `rename`。
 - **结果与会话一一对应**：`news_broadcast` 上报时把当前执行会话 id 写入期次（`sessionId`），
-  失败记录同样绑定；**删除某期新闻时联动销毁它对应的执行会话**（`execSessions` 表持有
+  失败记录同样绑定；**删除某期新闻时联动清理它对应的执行会话**（`execSessions` 表持有
   `AgentHandle`，DELETE 时 `dispose` 并清映射）。
+  ⚠ **DSH 没有「删除持久化会话」的 API**：`AgentHandle.dispose()` 只拆内存里运行的 agent
+  （停止循环/注销），会话的 JSONL 持久化文件是只追加、从不删除的，重启后会被重新加载而再次
+  出现。因此删除期次时除 `dispose`（本进程句柄优先，跨重启走 `resume→dispose` 兜底）外，
+  还必须调用 **`ctx.workspace.archiveSession(sessionId)`** 把该会话「归档」——归档集合持久化在
+  storage domain（重启不丢），UI 对归档会话在会话列表/分组/搜索里一律隐藏，从而实现「删除新闻
+  后对应执行会话从会话列表彻底消失且跨重启保持隐藏」。
   **关键：创建执行会话时必须在 `setup` 里 mount 默认 standing preset**
   （`agentPresets.mount(agentCtx)`，`meta.agentPreset` 记录 resolved id）——`web_search`/
   `web_fetch` 等工具是随 preset 按会话装配的，不 mount 的裸会话只有插件全局注册的

@@ -45,7 +45,7 @@ function makeFs(rootDir) {
   }
 }
 
-function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null, home = null } = {}) {
+function boot({ agentsService = null, llm = null, agentPresets = null, sessionTitle = null, workspace = null, home = null } = {}) {
   const homeDir = home || mkdtempSync(join(tmpdir(), 'dsh-news-test-'))
   const prevHome = process.env.HOME
   const prevDshHome = process.env.DSH_HOME
@@ -60,12 +60,13 @@ function boot({ agentsService = null, llm = null, agentPresets = null, sessionTi
     tools: { register: (tool) => { tools.push(tool) } },
     systemPrompt: { section: () => {} },
     effect: (fn) => { fn() },
-    // 懒获取服务（与真实宿主一致）：agents / llm / agentPresets / sessionTitle 仅在传入时才可见。
+    // 懒获取服务（与真实宿主一致）：agents / llm / agentPresets / sessionTitle / workspace 仅在传入时才可见。
     get: (k) => {
       if (k === 'agents') return agentsService
       if (k === 'llm') return llm
       if (k === 'agentPresets') return agentPresets
       if (k === 'sessionTitle') return sessionTitle
+      if (k === 'workspace') return workspace
       return undefined
     },
   })
@@ -500,9 +501,10 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
     } finally { cleanup() }
   })
 
-  it('删除期次联动销毁对应执行会话（dispose 被调用并清映射）', async () => {
+  it('删除期次联动销毁并归档对应执行会话（dispose + archiveSession）', async () => {
     let created = []
     const disposed = []
+    const archived = []
     const agents = makeAgents({
       agentsCreate: async (opts) => {
         created.push(opts)
@@ -514,7 +516,8 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
     })
     const live = agents.service.get('agent-live')
     live.options = { provider: 'deepseek', model: 'deepseek-chat' }
-    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service })
+    const workspace = { archiveSession: async (sid) => { archived.push(sid) } }
+    const { handler, newsBroadcast, cleanup } = boot({ agentsService: agents.service, workspace })
     try {
       await handler(makeReq({
         method: 'POST', url: '/dsh-music/news/schedule',
@@ -528,10 +531,12 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
       const sid = JSON.parse(rr.body).sessionId
       const b = await broadcast(newsBroadcast, { ...NEWS_BODY, shiftId: 's1' })
       expect(disposed.length).toBe(0) // 删除前未销毁
+      expect(archived.length).toBe(0)
       const del = makeRes()
       await handler(makeReq({ method: 'DELETE', url: '/dsh-music/news/' + b.editionId }), del)
       expect(JSON.parse(del.body).ok).toBe(true)
       expect(disposed).toEqual([sid]) // 删除期次 → 销毁对应执行会话
+      expect(archived).toEqual([sid]) // 并归档（跨重启从会话列表隐藏）
       // 期次已删除
       const res = makeRes()
       await handler(makeReq({ url: '/dsh-music/news' }), res)
@@ -570,6 +575,7 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
     // 第二次 boot（模拟重启）：同一 HOME、agents 服务无内存句柄，但暴露 resume。
     const resumed = []
     const disposedResumed = []
+    const archived2 = []
     const agents2 = makeAgents()
     agents2.service.resume = async (opts) => {
       resumed.push(opts.resumeSessionId)
@@ -579,7 +585,8 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
       }
     }
     agents2.service.get('agent-live').options = { provider: 'deepseek', model: 'deepseek-chat' }
-    const b2 = boot({ agentsService: agents2.service, home })
+    const workspace2 = { archiveSession: async (sid) => { archived2.push(sid) } }
+    const b2 = boot({ agentsService: agents2.service, workspace: workspace2, home })
     try {
       const del = makeRes()
       await b2.handler(makeReq({ method: 'DELETE', url: '/dsh-music/news/' + editionId }), del)
@@ -587,6 +594,8 @@ describe('每任务执行会话 + 结果绑定 + 删除联动', () => {
       // 本进程无句柄 → 走 resume→dispose 兜底，并立即 dispose 掉。
       expect(resumed).toEqual(created)
       expect(disposedResumed).toEqual(created)
+      // 归档执行会话：跨重启后从会话列表隐藏（持久化在 storage domain）。
+      expect(archived2).toEqual(created)
       const res = makeRes()
       await b2.handler(makeReq({ url: '/dsh-music/news' }), res)
       expect(JSON.parse(res.body).editions.length).toBe(0)
