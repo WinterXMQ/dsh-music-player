@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   PRESET_CATEGORIES, LIMITS, cnOrdinal, formatDateCn, sanitizeEditionInput,
-  renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown,
+  renderScript, splitScriptChunks, buildEdition, applyRetention, findInCooldown, partitionStaleNews,
   summarizeEdition, metaForEdition, estimateMinutes, sanitizeSchedulePrefs,
   sanitizeModelSelection, runStateAlive,
 } from '../lib/news-core.js'
@@ -65,12 +65,28 @@ describe('sanitizeEditionInput', () => {
     expect(r.ok).toBe(true)
     expect(r.value.categories[0].items.length).toBe(LIMITS.itemsPerCategory)
   })
-  it('超长 summary 截断且保留省略号', () => {
+  it('病态超长 summary 才截断且保留省略号（正常长度内容不截断）', () => {
+    // 正常长度（< summaryChars，即 200~220 字内）不被截断——不出现省略号。
+    const normal = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '普通新闻内容。'.repeat(20) }] }], // 160 字
+    })
+    expect(normal.value.categories[0].items[0].summary.endsWith('…')).toBe(false)
+    // 超过安全上限（防御病态输入）才截断并带省略号。
     const r = sanitizeEditionInput({
-      categories: [{ name: '热点', items: [{ title: 't', summary: '长'.repeat(300) }] }],
+      categories: [{ name: '热点', items: [{ title: 't', summary: '长'.repeat(LIMITS.summaryChars + 50) }] }],
     })
     expect(r.value.categories[0].items[0].summary.length).toBe(LIMITS.summaryChars)
     expect(r.value.categories[0].items[0].summary.endsWith('…')).toBe(true)
+  })
+  it('超长摘要兜底在句末标点处断句（播报不断在半截）', () => {
+    // 每句 12 字 ×30 = 360 字，超出 220：应在前 220 字内最后一个「。」处收句（12×18=216 字）
+    const r = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '第一句讲要点，内容充实。'.repeat(30) }] }],
+    })
+    const s = r.value.categories[0].items[0].summary
+    expect(s.length).toBe(216)
+    expect(s.endsWith('。')).toBe(true)
+    expect(s.endsWith('…')).toBe(false)
   })
 })
 
@@ -78,14 +94,34 @@ describe('renderScript + splitScriptChunks', () => {
   const input = sanitizeEditionInput(VALID_BODY).value
   const { text, itemOffsets, categoryOffsets } = renderScript(input)
 
-  it('开场含标题与日期与类别预告', () => {
-    expect(text.startsWith('您好，这里是早间新闻播报，2026年5月30日。今天的主要内容有：热点、AI。')).toBe(true)
+  it('开场含标题与日期（不再重复罗列类别）', () => {
+    expect(text.startsWith('您好，这里是早间新闻播报，2026年5月30日。')).toBe(true)
+    expect(text).not.toContain('今天的主要内容有')
   })
-  it('条目句含序数、标题、摘要、来源', () => {
+  it('标题已含日期时不重复追加日期', () => {
+    const r = sanitizeEditionInput({
+      title: '国内新闻播报 · 2026年8月31日', date: '2026-08-31',
+      categories: [{ name: '国内', items: [{ title: 't', summary: 's。', source: 'x' }] }],
+    }).value
+    const { text: t2 } = renderScript(r)
+    expect(t2.startsWith('您好，这里是国内新闻播报 · 2026年8月31日。')).toBe(true)
+    // 只出现一次「2026年8月31日」（标题里的一次，开场不再追加）。
+    expect(t2.match(/2026年8月31日/g).length).toBe(1)
+  })
+  it('条目句含序数、标题、摘要；不含来源尾缀', () => {
     expect(text).toContain('第一条，某重大政策发布。今早国新办举行发布会')
-    expect(text).toContain('以上消息来自新华社。')
+    expect(text).not.toContain('以上消息来自')
     expect(text).toContain('首先来听热点。')
     expect(text).toContain('接下来听AI。')
+  })
+  it('摘要自带句号时不会出现重复句号', () => {
+    // VALID_BODY 的 summary 不带句号；构造一个带句号的验证不出现「。。」
+    const r = sanitizeEditionInput({
+      categories: [{ name: '热点', items: [{ title: 't', summary: '事件要点。事件影响。' }] }],
+    }).value
+    const { text: t2 } = renderScript(r)
+    expect(t2).toContain('第一条，t。事件要点。事件影响。')
+    expect(t2).not.toContain('。。')
   })
   it('条目与类别偏移指向正确文本起点', () => {
     expect(text.slice(itemOffsets[0], itemOffsets[0] + 4)).toBe('第一条，')
@@ -103,6 +139,37 @@ describe('renderScript + splitScriptChunks', () => {
     const chunks = splitScriptChunks('长'.repeat(450) + '。')
     expect(chunks.join('').length).toBe(451)
     expect(chunks.every((c) => c.length <= 200)).toBe(true)
+  })
+})
+
+describe('单类别期次（不播类别引导语）', () => {
+  const single = sanitizeEditionInput({
+    title: 'AI 新闻简报', date: '2026-08-31',
+    opening: '各位听众早上好，今天是2026年8月31日，星期一。以下是今日国内要闻。',
+    categories: [{ name: '国内', items: [
+      { title: '政策发布', summary: '国新办介绍相关政策要点。', source: '新华社' },
+      { title: '强降雨持续', summary: '多地启动应急响应。', source: '央视新闻' },
+    ] }],
+  }).value
+  const { text, categoryOffsets } = renderScript(single)
+  const e = buildEdition(single, { id: 'n9', createdAt: 1000 })
+
+  it('开场后直接进第一条新闻，不再播「首先来听X」', () => {
+    expect(text).toContain('以下是今日国内要闻。第一条，政策发布。')
+    expect(text).not.toContain('首先来听')
+    expect(text).not.toContain('接下来听')
+  })
+  it('类别偏移指向首条条目起点（目录跳转落到第一条新闻）', () => {
+    expect(categoryOffsets.length).toBe(1)
+    expect(text.slice(categoryOffsets[0], categoryOffsets[0] + 4)).toBe('第一条，')
+  })
+  it('categoryChunk 与 meta sections 对齐，跳转块即首条新闻；开场白独占一块', () => {
+    expect(e.categoryChunk.length).toBe(1)
+    const meta = metaForEdition(e)
+    expect(meta.sections[0].heading).toBe('国内')
+    expect(meta.sections[0].fromChunk).toBe(e.categoryChunk[0])
+    expect(e.chunks[e.categoryChunk[0]].startsWith('第一条，')).toBe(true)
+    expect(e.chunks[0]).toBe(single.opening)
   })
 })
 
@@ -174,6 +241,31 @@ describe('findInCooldown（冷却窗）', () => {
   })
 })
 
+describe('partitionStaleNews（每日 03:00 过期清理）', () => {
+  const START = 1000 // 「今日 00:00」
+  const old1 = { id: 'old1', createdAt: 500, sessionId: 'news-exec-a' }
+  const old2 = { id: 'old2', createdAt: 999, sessionId: 'news-exec-b' }
+  const fresh = { id: 'fresh', createdAt: 1000, sessionId: 'news-exec-c' } // 恰好今天 00:00 → 保留
+  const newer = { id: 'newer', createdAt: 5000, sessionId: null }
+  it('按 createdAt 分离今天之前的期次，边界值（=00:00）保留', () => {
+    const { staleEditions } = partitionStaleNews([old1, old2, fresh, newer], [], START)
+    expect(staleEditions.map((e) => e.id)).toEqual(['old1', 'old2'])
+  })
+  it('失败记录按 ts 分离；会话 id 去重汇总（期次 + 失败共用会话只出现一次）', () => {
+    const failures = [
+      { ts: 400, kind: 'empty', sessionId: 'news-exec-a' }, // 与 old1 同会话 → 去重
+      { ts: 1200, kind: 'error' }, // 今天 → 保留
+    ]
+    const { staleFailures, sessionIds } = partitionStaleNews([old1, old2, fresh], failures, START)
+    expect(staleFailures.length).toBe(1)
+    expect(sessionIds).toEqual(['news-exec-a', 'news-exec-b'])
+  })
+  it('空输入与无会话字段安全', () => {
+    expect(partitionStaleNews([], [], START)).toEqual({ staleEditions: [], staleFailures: [], sessionIds: [] })
+    expect(partitionStaleNews([{ id: 'x', createdAt: 1 }], [], START).sessionIds).toEqual([])
+  })
+})
+
 describe('summarizeEdition', () => {
   it('列表行含类别计数与播放状态', () => {
     const input = sanitizeEditionInput(VALID_BODY).value
@@ -193,14 +285,13 @@ describe('sanitizeSchedulePrefs', () => {
     expect(p.prefVersion).toBe(0)
     expect(p.syncedVersion).toBe(-1)
   })
-  it('默认类别白名单过滤', () => {
+  it('defaultScope 已退役：入参中的该字段被丢弃', () => {
     const p = sanitizeSchedulePrefs({
       defaultScope: { categories: ['热点', '不存在', '国内'], topics: ['AI', ''] },
     })
-    expect(p.defaultScope.categories).toEqual(['热点', '国内'])
-    expect(p.defaultScope.topics).toEqual(['AI'])
+    expect(p.defaultScope).toBeUndefined()
   })
-  it('班次时间非法被丢弃、超限截断、scope=null 表示继承默认', () => {
+  it('班次时间非法被丢弃、超限截断、scope=null 兜底为全预设类别', () => {
     const p = sanitizeSchedulePrefs({
       shifts: [
         { id: 'a', time: '08:00', autoplay: false, scope: null },
@@ -210,8 +301,18 @@ describe('sanitizeSchedulePrefs', () => {
     })
     expect(p.shifts.length).toBe(2)
     expect(p.shifts[0].autoplay).toBe(false)
-    expect(p.shifts[0].scope).toBe(null)
+    expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
     expect(p.shifts[1].scope.topics.length).toBe(LIMITS.topicsPerShift)
+  })
+  it('空范围兜底为全预设类别；纯主题范围原样保留', () => {
+    const p = sanitizeSchedulePrefs({
+      shifts: [
+        { id: 'a', time: '08:00', scope: { categories: [], topics: [] } },
+        { id: 'b', time: '09:00', scope: { categories: [], topics: ['AI'] } },
+      ],
+    })
+    expect(p.shifts[0].scope).toEqual({ categories: PRESET_CATEGORIES, topics: [] })
+    expect(p.shifts[1].scope).toEqual({ categories: [], topics: ['AI'] })
   })
   it('班次数上限 6', () => {
     const shifts = Array.from({ length: 9 }, (_, i) => ({ time: `0${i}:00` }))

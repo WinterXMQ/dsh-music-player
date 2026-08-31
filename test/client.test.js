@@ -144,7 +144,8 @@ const newsMetaFixture = {
   itemChunk: [0, 0, 1, 2, 2, 3, 3], categoryChunk: [0, 2, 3],
 }
 const newsScheduleDefault = {
-  enabled: true, defaultScope: { categories: ['热点', '国内', '国际', '科技', '财经', '体育'], topics: [] },
+  enabled: true,
+  // 旧数据兼容用例：scope=null 的存量班次，卡片按全部预设类别兜底展示（defaultScope 已退役，不再出现在数据里）
   shifts: [{ id: 's1', time: '08:00', autoplay: true, scope: null }], prefVersion: 1, syncedVersion: 1,
 }
 let newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
@@ -8217,7 +8218,7 @@ describe('dsh-music-player client render smoke', () => {
     expect(rowText.some((t) => t.includes('小说目录') && t.includes('/books'))).toBe(true)
     expect(rowText.some((t) => t.includes('曲库歌曲') && t.includes('1 首'))).toBe(true)
     expect(rowText.some((t) => t.includes('本地小说') && t.includes('1 本'))).toBe(true)
-    expect(rowText.some((t) => t.includes('AI 讲书') && t.includes('已配置') && t.includes('xiaomi-mimo'))).toBe(true)
+    expect(rowText.some((t) => t.includes('AI 讲书/新闻播报') && t.includes('已配置') && t.includes('xiaomi-mimo'))).toBe(true)
     expect(rowText.some((t) => t.includes('QQ音乐') && t.includes('已登录（微信）') && !t.includes('测试用户'))).toBe(true)
     expect(rowText.some((t) => t.includes('酷狗音乐') && t.includes('已登录'))).toBe(true)
 
@@ -8506,9 +8507,9 @@ describe('news pane（新闻播报页签）', () => {
       expect(tab).toBeTruthy()
       act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 状态行：⏰ 每日定时 + 同步状态
+      // 状态行：⏰ 每日定时 + 班次数（Host 自维护，无同步状态）
       expect(container.textContent).toContain('⏰ 每日定时')
-      expect(container.textContent).toContain('已同步 · 1 班次')
+      expect(container.textContent).toContain('1 班次')
       // 期次行：标题 + 待播徽标 + 类别 chips
       expect(container.textContent).toContain('早间新闻播报')
       expect(container.textContent).toContain('待播')
@@ -8537,6 +8538,13 @@ describe('news pane（新闻播报页签）', () => {
       const row = [...container.querySelectorAll('.dsh-music-track')].find((r) => r.textContent.includes('早间新闻播报'))
       act(() => { row.querySelector('.dsh-music-track-main').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 详情层结构：头部（返回/操作栏）固定，仅下方内容列表滚动
+      const headEl = container.querySelector('.dsh-music-news-head')
+      const bodyEl = container.querySelector('.dsh-music-news-body')
+      expect(headEl).toBeTruthy()
+      expect(bodyEl).toBeTruthy()
+      expect(headEl.textContent).toContain('早间新闻播报')
+      expect(bodyEl.textContent).toContain('热点（2）')
       // 类别小节 + 条目（meta fixture）
       expect(container.textContent).toContain('热点（2）')
       expect(container.textContent).toContain('1. 政策发布会召开')
@@ -8556,7 +8564,7 @@ describe('news pane（新闻播报页签）', () => {
     } finally { }
   })
 
-  it('定时编辑器：班次行/默认类别/同步状态渲染，保存触发 POST', async () => {
+  it('定时编辑器：班次卡片/添加弹窗渲染，保存触发 POST', async () => {
     const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
     const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
     const container = document.createElement('div')
@@ -8571,20 +8579,105 @@ describe('news pane（新闻播报页签）', () => {
       const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
       act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      // 班次行 + 勾选 + 范围摘要 + 同步状态
-      expect(container.textContent).toContain('收集后立即播放')
-      expect(container.textContent).toContain('已同步 · 1 班次')
-      expect(container.querySelector('input[type="time"]')).toBeTruthy()
-      // 默认类别 chips 全部渲染（热点在第一）
-      const chips = [...container.querySelectorAll('.dsh-music-subtab')].map((b) => b.textContent)
-      expect(chips.indexOf('热点')).toBeLessThan(chips.indexOf('国内'))
-      // 保存 → POST body 携带班次
-      const saveBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '保存')
-      act(() => { saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 班次卡片：时间 + 范围摘要 + 立即播放开关 + 操作按钮
+      const cards = [...container.querySelectorAll('.dsh-music-news-shift-card')]
+      expect(cards.length).toBe(1)
+      expect(cards[0].textContent).toContain('08:00')
+      // 旧 null scope 兜底展示全部预设类别，不再有「默认 · 」前缀（defaultScope 已退役）
+      expect(cards[0].textContent).toContain('热点/国内/国际/科技/财经/体育/娱乐')
+      expect(cards[0].textContent.includes('默认 · ')).toBe(false)
+      expect(cards[0].textContent).toContain('立即播放')
+      // 添加班次按钮位于班次标题右侧，点击弹出设置弹窗（不是平铺在编辑器里）
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      expect(addBtn).toBeTruthy()
+      act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-      expect(newsScheduleServer.shifts.length).toBe(1)
+      // 弹窗：标题 + 时刻输入 + 类别 chips + 确定（其它测试可能残留其它 overlay，按内容定位）
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      expect(overlay).toBeTruthy()
+      expect(overlay.textContent).toContain('添加班次')
+      const timeInput = overlay.querySelector('input[type="time"]')
+      expect(timeInput).toBeTruthy()
+      const chipBtns = [...overlay.querySelectorAll('.dsh-music-subtab')]
+      expect(chipBtns.map((b) => b.textContent).indexOf('热点')).toBeGreaterThanOrEqual(0)
+      // 范围必填：新班次默认一个类别都不选 → 「添加」禁用（无提示文案，仅按钮置灰）；选一个类别 → 恢复可用
+      expect(chipBtns.every((b) => !b.className.includes('active'))).toBe(true)
+      const okBtn0 = [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加')
+      expect(okBtn0.disabled).toBe(true)
+      expect(overlay.textContent.includes('至少选择一个类别')).toBe(false)
+      act(() => { chipBtns[0].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
+      // 改时刻后确定 → 新增班次（编辑器里的卡片从 1 变 2）
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(timeInput, '21:30')
+        timeInput.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      const okBtn = [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加')
+      act(() => { okBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      // 弹窗已关闭（overlay 从 DOM 移除；其它测试残留的 overlay 不影响）
+      expect(overlay.isConnected).toBe(false)
+      const cardsAfter = [...container.querySelectorAll('.dsh-music-news-shift-card')]
+      expect(cardsAfter.length).toBe(2)
+      expect(container.textContent).toContain('21:30')
+      // 已移除全局「默认类别」区块与手动「保存」按钮（编辑即自动保存）
+      expect(container.textContent.includes('默认类别')).toBe(false)
+      expect([...container.querySelectorAll('button')].some((b) => b.textContent === '保存')).toBe(false)
+      // 自动保存：防抖窗口（500ms）过后，POST 已把新增班次落盘
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) })
+      expect(newsScheduleServer.shifts.length).toBe(2)
       expect(newsScheduleServer.shifts[0].time).toBe('08:00')
-    } finally { }
+      expect(newsScheduleServer.shifts[1].time).toBe('21:30')
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
+  })
+
+  it('添加班次：自定义主题输入即生效，无需回车（保存时自动收进 topics）', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      const tab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { tab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const statusBtn = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('⏰ 每日定时'))
+      act(() => { statusBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const addBtn = [...container.querySelectorAll('button')].find((b) => b.textContent === '＋ 添加班次')
+      act(() => { addBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const overlay = [...document.body.querySelectorAll('.dsh-music-picker-overlay')].find((el) => el.textContent.includes('添加班次'))
+      expect(overlay).toBeTruthy()
+      // 不选类别、主题输入框为空 → 「添加」禁用
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(true)
+      // 仅输入主题文本（不按回车）→ 「添加」即可点击
+      const topicInput = overlay.querySelector('input[placeholder="如 AI、新能源汽车"]')
+      expect(topicInput).toBeTruthy()
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+        setter.call(topicInput, 'AI')
+        topicInput.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect([...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').disabled).toBe(false)
+      // 直接点添加（不回车）→ 主题收进班次范围：topics=['AI']、categories=[]
+      act(() => { [...overlay.querySelectorAll('button')].find((b) => b.textContent === '添加').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      expect(overlay.isConnected).toBe(false)
+      await act(async () => { await new Promise((r) => setTimeout(r, 650)) }) // 等防抖自动保存落盘
+      expect(newsScheduleServer.shifts.length).toBe(2)
+      expect(newsScheduleServer.shifts[1].scope.categories).toEqual([])
+      expect(newsScheduleServer.shifts[1].scope.topics).toEqual(['AI'])
+    } finally {
+      newsScheduleServer = JSON.parse(JSON.stringify(newsScheduleDefault))
+    }
   })
 
   it('新闻期次播放时显示字幕（走 /dsh-music/news/<id>/text 而非 /dsh-music/book/）', async () => {
@@ -8638,5 +8731,41 @@ describe('news pane（新闻播报页签）', () => {
     } finally {
       bookTextFixture = ''
     }
+  })
+
+  it('AI讲书底部恢复「支持 .txt / .epub 文件」编号提示；新闻播报底部为单条 xiaomi 提示', async () => {
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    try {
+      act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // AI讲书：底部编号列表，格式说明排首位
+      const bookTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === 'AI讲书')
+      expect(bookTab).toBeTruthy()
+      act(() => { bookTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const bookHint = container.querySelector('.dsh-music-tts-hint')
+      expect(bookHint).toBeTruthy()
+      expect(bookHint.textContent).toContain('1. 支持 .txt / .epub 文件')
+      expect(bookHint.textContent).toContain('2. AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      // 新闻播报：底部为单条 xiaomi 提示（无编号、无格式说明）
+      const newsTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '新闻播报')
+      act(() => { newsTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const newsHint = container.querySelector('.dsh-music-tts-hint')
+      expect(newsHint).toBeTruthy()
+      expect(newsHint.textContent).toContain('AI语音目前仅支持xiaomi提供方（限时免费），请在设置中配置好再使用此功能。')
+      expect(newsHint.textContent.includes('支持 .txt')).toBe(false)
+      // 本地音乐：底部为单条格式说明（顶部设置块不再显示提示）
+      const musicTab = [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '本地音乐')
+      act(() => { musicTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+      const musicHint = container.querySelector('.dsh-music-tts-hint')
+      expect(musicHint).toBeTruthy()
+      expect(musicHint.textContent).toContain('支持 mp3 / m4a / flac / wav / ogg / opus / aac / webm 等格式，自动递归扫描子目录。')
+    } finally { }
   })
 })
